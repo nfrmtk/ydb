@@ -615,14 +615,14 @@ public:
     EFetchResult FetchValues(TComputationContext& ctx, NUdf::TUnboxedValue*const* output) {
         while (true) {
             switch(GetMode()) {
-                case EOperatingMode::InMemory: {
+                case EOperatingMode::InMemory: { // firstly, it is in memory
                     auto r = DoCalculateInMemory(ctx, output);
                     if (GetMode() == EOperatingMode::InMemory) {
                         return r;
                     }
                     break;
                 }
-                case EOperatingMode::Spilling: {
+                case EOperatingMode::Spilling: { // if memory is not enough it spills
                     auto r = DoCalculateWithSpilling(ctx, output);
                     if (r == EFetchResult::One)
                         return r;
@@ -631,7 +631,7 @@ public:
                     }
                     break;
                 }
-                case EOperatingMode::ProcessSpilled: {
+                case EOperatingMode::ProcessSpilled: { // then it processes spilled data???? (not sure)
                     return ProcessSpilledData(ctx, output);
                 }
 
@@ -663,6 +663,10 @@ private:
 
     void SwitchMode(EOperatingMode mode, TComputationContext& ctx) {
         LogMemoryUsage();
+        // TGraceJoinSpillingSupportState::Mode ~ from, mode ~ to 
+        // these and only these switches allowed: 
+        // 1. from inMemory to Spilling
+        // 2. from Spilling to ProcessSpilled
         switch(mode) {
             case EOperatingMode::InMemory: {
                 UDF_LOG(Logger, LogComponent, NUdf::ELogLevel::Info, TStringBuilder()
@@ -682,6 +686,9 @@ private:
             case EOperatingMode::ProcessSpilled: {
                 UDF_LOG(Logger, LogComponent, NUdf::ELogLevel::Info, TStringBuilder()
                         << (const void *)&*JoinedTablePtr << "# switching Memory mode to ProcessSpilled");
+                // make permutation of buckets SpilledBucketsJoinOrder, where first elements correspond to buckets,
+                // with their parts in memory for both right and left tables, 
+                // then for only 1 of tables, and then for 0
                 SpilledBucketsJoinOrder.reserve(GraceJoin::NumberOfBuckets);
                 for (ui32 i = 0; i < GraceJoin::NumberOfBuckets; ++i) SpilledBucketsJoinOrder.push_back(i);
 
@@ -691,7 +698,8 @@ private:
 
                     return lhs_in_memory > rhs_in_memory;
                 });
-                MKQL_ENSURE(EOperatingMode::Spilling == Mode, "Internal logic error");
+                // end make permutation
+                MKQL_ENSURE(EOperatingMode::Spilling == Mode, "Internal logic error"); // can be moved to the top of the case statement
                 break;
             }
 
@@ -716,7 +724,7 @@ private:
                     ; // row dropped
                 else if (JoinKind == EJoinKind::Inner || JoinKind == EJoinKind::Right || JoinKind == EJoinKind::RightSemi || JoinKind == EJoinKind::RightOnly || JoinKind == EJoinKind::LeftSemi)
                     ; // row dropped
-                else { // Left, LeftOnly, Full, Exclusion: output row
+                else { // Left, LeftOnly, Full, Exclusion: output row, assert(added==EATR::Unmatched);
                     for (size_t i = 0; i < LeftRenames.size() / 2; i++) {
                         auto & valPtr = output[LeftRenames[2 * i + 1]];
                         if ( valPtr ) {
@@ -842,12 +850,14 @@ private:
     }
 
     EFetchResult DoCalculateInMemory(TComputationContext& ctx, NUdf::TUnboxedValue*const* output) {
+        // че происходит если памяти нет?
         // Collecting data for join and perform join (batch or full)
         while (!*JoinCompleted ) {
 
             if ( *PartialJoinCompleted) {
                 // Returns join results (batch or full)
-                while (JoinedTablePtr->NextJoinedData(LeftPacker->JoinTupleData, RightPacker->JoinTupleData)) {
+                // while + return == if + return 
+                while(JoinedTablePtr->NextJoinedData(LeftPacker->JoinTupleData, RightPacker->JoinTupleData)) {
                     UnpackJoinedData(output);
                     return EFetchResult::One;
                 }
@@ -882,18 +892,30 @@ private:
                 *HaveMoreRightRows = false;
                 return EFetchResult::Finish;
             }
+
             if (isYield == EFetchResult::One)
                 return isYield;
-            if (IsSpillingAllowed && ctx.SpillerFactory && IsSwitchToSpillingModeCondition()) {
+            if (IsSpillingAllowed && ctx.SpillerFactory && IsSwitchToSpillingModeCondition()) { // можно включать спилинг и память кончилась
                 SwitchMode(EOperatingMode::Spilling, ctx);
                 return EFetchResult::Yield;
             }
-            if (isYield != EFetchResult::Finish) return isYield;
+            if (isYield != EFetchResult::Finish) return isYield; // since isYield is not One, this is equivalent to isYield == EFR::Yield
+
+            // assert(isYield == EFR::Finish)
+            // idea: build ht for small -> process big. // 
 
 
-            if (!*PartialJoinCompleted && (
-                (!*HaveMoreRightRows && (!*HaveMoreLeftRows || LeftPacker->TuplesBatchPacked >= LeftPacker->BatchSize )) ||
-                (!*HaveMoreLeftRows && RightPacker->TuplesBatchPacked >= RightPacker->BatchSize))) {
+            // state machine: 
+            // getting_data -> join, getting_data 
+            // join -> ret_data 
+            // ret_data -> ret_data, getting_data, return 
+            // return <- sink 
+
+            if (
+                !*PartialJoinCompleted
+                 && ( (!*HaveMoreRightRows && (!*HaveMoreLeftRows || LeftPacker->TuplesBatchPacked >= LeftPacker->BatchSize )) ||
+                (!*HaveMoreLeftRows && RightPacker->TuplesBatchPacked >= RightPacker->BatchSize))
+            ) {
 
                 UDF_LOG(Logger, LogComponent, GRACEJOIN_TRACE, TStringBuilder()
                     << (const void *)&*JoinedTablePtr << '#'
@@ -1055,6 +1077,8 @@ EFetchResult ProcessSpilledData(TComputationContext&, NUdf::TUnboxedValue*const*
     }
     return EFetchResult::Finish;
 }
+
+// SwapTables.
 
 private:
     EOperatingMode Mode = EOperatingMode::InMemory;

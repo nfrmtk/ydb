@@ -321,7 +321,8 @@ void ResizeHashTable(KeysHashTable &t, ui64 newSlots){
 }
 
 bool IsTablesSwapRequired(ui64 tuplesNum1, ui64 tuplesNum2, bool table1Batch, bool table2Batch) {
-     return tuplesNum2 > tuplesNum1 && !table1Batch || table2Batch;
+    const bool isSecondTableBigger = tuplesNum2 > tuplesNum1;
+    return isSecondTableBigger && !table1Batch || table2Batch; // so second table is adviced to be smaller.
 }
 
 ui64 ComputeJoinSlotsSizeForBucket(const TTableBucket& bucket, const TTableBucketStats& bucketStats, ui64 headerSize, bool tableHasKeyStringColumns, bool tableHasKeyIColumns) {
@@ -439,7 +440,7 @@ void TTable::Join( TTable & t1, TTable & t2, EJoinKind joinKind, bool hasMoreLef
         bool table2HasKeyIColumns = (JoinTable2->NumberOfKeyIColumns != 0);
         bool swapTables = IsTablesSwapRequired(tuplesNum1, tuplesNum2, table1Batch, table2Batch);
 
-
+// here somewhere, decide which table is bigger.
         if (swapTables) {
             std::swap(bucket1, bucket2);
             std::swap(bucketStats1, bucketStats2);
@@ -450,6 +451,7 @@ void TTable::Join( TTable & t1, TTable & t2, EJoinKind joinKind, bool hasMoreLef
             std::swap(table1HasKeyIColumns, table2HasKeyIColumns);
             std::swap(tuplesNum1, tuplesNum2);
        }
+       // second table is smaller
 
         auto &leftIds = bucket1->LeftIds;
         leftIds.clear();
