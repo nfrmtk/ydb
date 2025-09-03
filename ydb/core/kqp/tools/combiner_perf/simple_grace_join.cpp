@@ -274,8 +274,8 @@ THolder<IComputationGraph> BuildGraph(TSetup<LLVM, Spilling>& setup, std::shared
     ));
 
     /// renames in pgmReturn go in pairs. They mean: 
-    /// leftRenames: {0(index in left table for),0(index in output table),1(index in left table for),1(index in output table)}
-    /// rightRenames: {1(index in right table for), 2(index in output table)}
+    /// leftRenames: [0(index in left table for),0(index in output table),1(index in left table for),1(index in output table)]
+    /// rightRenames: [1(index in right table for), 2(index in output table)]
     /// it is of course important that {leftRenames[1], leftRenames[3], rightRenames[1]} is permutation of first 3 non-negative values.
 
     auto graph = setup.BuildGraph(pgmReturn, {leftStreamCallable, rightStreamCallable});
