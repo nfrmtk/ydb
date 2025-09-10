@@ -1,5 +1,6 @@
 #include "dq_program_builder.h"
 #include "type_utils.h"
+#include "dq_combiner_params.h"
 
 #include <yql/essentials/minikql/mkql_node.h>
 #include <yql/essentials/minikql/mkql_node_cast.h>
@@ -27,6 +28,7 @@ TCallableBuilder TDqProgramBuilder::BuildCommonCombinerParams(
     if (hasBlocks) {
         unblockedWideComponents.pop_back(); // Block height parameter
     }
+
 
     TRuntimeNode::TList itemArgs;
     itemArgs.reserve(unblockedWideComponents.size());
@@ -70,7 +72,10 @@ TCallableBuilder TDqProgramBuilder::BuildCommonCombinerParams(
     }
 
     TCallableBuilder callableBuilder(GetTypeEnvironment(), operatorName, NewStreamType(NewMultiType(outputWideComponents)));
-
+    TRuntimeNode params = MakeRuntimeNode<TCombinerParams>({.foo = 1, .baz=0.3});  
+    // dont forget to delete static_cast<TValueNode<TCombinerParams>*>(params.GetNode());
+    callableBuilder.Add(params);
+    return callableBuilder; 
     callableBuilder.Add(flow);
     callableBuilder.Add(operatorParams);
     callableBuilder.Add(NewTuple(keyArgs));

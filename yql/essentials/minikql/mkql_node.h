@@ -123,6 +123,10 @@ protected:
     TType* Type_;
     ui64 Cookie_;
 };
+template<typename T>
+struct TValueNode: public TNode{
+    T value;
+};
 
 class TTypeType;
 class TTypeEnvironment;
