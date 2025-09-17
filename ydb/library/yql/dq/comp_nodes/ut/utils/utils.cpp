@@ -206,8 +206,8 @@ TVector<NUdf::TUnboxedValue> ConvertListToVector(const NUdf::TUnboxedValue& list
     return items;
 }
 
-void CompareListsIgnoringOrder(const TType* type, const NUdf::TUnboxedValue& expected,
-        const NUdf::TUnboxedValue& got
+void CompareVectorsIgnoringOrder(const TType* type, TVector<NYql::NUdf::TUnboxedValue> expected,
+        TVector<NYql::NUdf::TUnboxedValue> got
 ) {
     const auto itemType = AS_TYPE(TListType, type)->GetItemType();
     const NUdf::ICompare::TPtr compare = MakeCompareImpl(itemType);
@@ -219,14 +219,17 @@ void CompareListsIgnoringOrder(const TType* type, const NUdf::TUnboxedValue& exp
     const TValueLess valueLess(keyTypesStub, isTupleStub, compare.Get());
     const TValueEqual valueEqual(keyTypesStub, isTupleStub, equate.Get());
 
-    auto expectedItems = ConvertListToVector(expected);
-    auto gotItems = ConvertListToVector(got);
-    UNIT_ASSERT_VALUES_EQUAL(expectedItems.size(), gotItems.size());
-    Sort(expectedItems, valueLess);
-    Sort(gotItems, valueLess);
-    for (size_t i = 0; i < expectedItems.size(); i++) {
-        UNIT_ASSERT(valueEqual(gotItems[i], expectedItems[i]));
+    UNIT_ASSERT_VALUES_EQUAL(expected.size(), got.size());
+    Sort(expected, valueLess);
+    Sort(got, valueLess);
+    for (size_t i = 0; i < expected.size(); i++) {
+        got[i]
+        UNIT_ASSERT(valueEqual(got[i], expected[i]));
     }
+}
+
+void CompareListsIgnoringOrder(const TType* type, const NUdf::TUnboxedValue& expected, const NUdf::TUnboxedValue& got){
+    CompareVectorsIgnoringOrder(type, ConvertListToVector(expected), ConvertListToVector(got));
 }
 
 } // namespace NKikimr::NMiniKQL

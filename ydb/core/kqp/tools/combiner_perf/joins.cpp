@@ -44,7 +44,7 @@ struct TTestResult {
     TString TestName;
 };
 
-int LineSize(NKikimr::NMiniKQL::ETestedJoinAlgo algo, std::span<const NYql::NUdf::TUnboxedValue> line) {
+int LineSize(NKikimr::NMiniKQL::ETestedJoinAlgo algo, std::span<const NYql::NUdf::TUnboxedValue> line) {    
     if (NKikimr::NMiniKQL::IsBlockJoin(algo)) {
         return NKikimr::NMiniKQL::TArrowBlock::From(line.back()).GetDatum().scalar_as<arrow::UInt64Scalar>().value;
     } else {
@@ -62,13 +62,19 @@ void NKikimr::NMiniKQL::RunJoinsBench(const TRunParams& params, TTestResultColle
 
     const TVector<const ui32> keyColumns{0};
 
-    TVector<std::pair<NYKQL::ETestedJoinAlgo, std::string_view>> cases = {
+    TVector<std::pair<NYKQL::ETestedJoinAlgo, std::string_view>> algos = {
         {NYKQL::ETestedJoinAlgo::kScalarGrace, "ScalarGrace"},
         {NYKQL::ETestedJoinAlgo::kScalarMap, "ScalarMap"},
         {NYKQL::ETestedJoinAlgo::kBlockMap, "BlockMap"},
     };
-    const int bigSize = 1 << 16;
+    const int bigSize = 1 << 13;
     const int smallSize = bigSize >> 7;
+    auto addStringAndIntInputs = [&](TVector<std::pair<NYKQL::TInnerJoinDescription, std::string>>& all, int leftSize, int rightSize, std::string name){
+        all.emplace_back(PrepareDescription(&setup, GenerateIntegerKeyColumn(leftSize, 123), GenerateIntegerKeyColumn(rightSize, 111)),
+        name+"Integer");
+        all.emplace_back(PrepareDescription(&setup, GenerateStringKeyColumn(leftSize, 123), GenerateStringKeyColumn(rightSize, 111)),
+        name+"String");
+    }
     TVector<std::pair<NYKQL::TInnerJoinDescription, std::string_view>> inputs = {
         {PrepareDescription(&setup, GenerateIntegerKeyColumn(bigSize, 123), GenerateIntegerKeyColumn(bigSize, 111)),
          "SameSizeInteger"},
@@ -78,14 +84,32 @@ void NKikimr::NMiniKQL::RunJoinsBench(const TRunParams& params, TTestResultColle
          "SameSizeString"},
         {PrepareDescription(&setup, GenerateStringKeyColumn(bigSize, 123), GenerateStringKeyColumn(smallSize, 111)),
          "SmallRightString"}};
+    TVector<int> scales = {
+        256,
+        16,
+        1
+    };
+    auto* psetup = &setup;
+    TVector<std::pair<NYKQL::TInnerJoinDescription, std::string>> scaled_inputs;
+    for(int scale: scales){
+        addStringAndIntInputs(scaled_inputs, bigSize*scale, bigSize*scale, Sprintf("SameSize%i", bigSize*scale));
+        addStringAndIntInputs(scaled_inputs, bigSize*scale, smallSize*scale, Sprintf("BigLeft%i", bigSize*scale));
+    }
 
-    for (auto [algo, algo_name] : cases) {
-        for (auto [descr, descr_name] : inputs) {
+    
+    
+    for (auto [algo, algo_name] : algos) {
+        for (auto [descr, descr_name] : scaled_inputs) {
+            for (int scale: scales) {
+
+            
             descr.LeftSource.KeyColumnIndexes = keyColumns;
             descr.RightSource.KeyColumnIndexes = keyColumns;
 
-            THolder<NKikimr::NMiniKQL::IComputationGraph> wideStreamGraph = ConstructInnerJoinGraphStream(algo, descr);
-            NYql::NUdf::TUnboxedValue wideStream = wideStreamGraph->GetValue();
+            auto graphsMaker = Construct(algo, descr);
+            auto wideStreamGraph = graphsMaker->MakeWideStreamGraph();
+            // auto graphs = ConstructInnerJoinGraphStream(algo, descr);
+            NYql::NUdf::TUnboxedValue wideStream = graphs.WideStream->GetValue();
             std::vector<NYql::NUdf::TUnboxedValue> fetchBuff;
             ui32 cols = NKikimr::NMiniKQL::ResultColumnCount(algo, descr);
             fetchBuff.resize(cols);
@@ -106,6 +130,7 @@ void NKikimr::NMiniKQL::RunJoinsBench(const TRunParams& params, TTestResultColle
             Cerr << ". Output line count(block considered to be 1 line): " << lineCount << Endl;
             std::string testname = std::string{algo_name} + "_" + std::string{descr_name};
             printout.SubmitMetrics(params, thisNodeResult, testname.data(), false, false);
+        }
         }
     }
 }

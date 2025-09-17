@@ -19,7 +19,22 @@ struct TInnerJoinDescription {
 
 bool IsBlockJoin(ETestedJoinAlgo algo);
 
-THolder<IComputationGraph> ConstructInnerJoinGraphStream(ETestedJoinAlgo algo, TInnerJoinDescription descr);
+struct IJoinBenchHelper {
+    virtual TVector<NYql::NUdf::TUnboxedValue> JoinedValues() const = 0;
+    virtual int64_t RowCountFast() const = 0;
+};
+
+
+std::unique_ptr<IJoinBenchHelper> Construct(ETestedJoinAlgo algo, TInnerJoinDescription descr);
+
+
+struct TConstructedJoinGraph {
+    THolder<IComputationGraph> WideStream;
+    THolder<IComputationGraph> RawJoin;
+    int64_t(*SkipJoinValuesFn)(NYql::NUdf::TUnboxedValue);
+};
+
+TConstructedJoinGraph ConstructInnerJoinGraphStream(ETestedJoinAlgo algo, TInnerJoinDescription descr);
 
 i32 ResultColumnCount(ETestedJoinAlgo algo, TInnerJoinDescription descr);
 } // namespace NKikimr::NMiniKQL
