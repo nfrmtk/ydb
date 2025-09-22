@@ -109,12 +109,18 @@ void NKikimr::NMiniKQL::RunJoinsBench(const TRunParams& params, TTestResultColle
             while ((fetchStatus = wideStream.WideFetch(fetchBuff.data(), cols)) != NYql::NUdf::EFetchStatus::Finish) {
                 if (fetchStatus == NYql::NUdf::EFetchStatus::Ok) {
                     lineCount += LineSize(algo, {fetchBuff.data(), cols});
+                    if (!IsBlockJoin(algo)){
+                        if (algo_name.ends_with("String")){
+                            Y_DEBUG_ABORT_UNLESS(std::as_const(fetchBuff[0]).AsStringRef().size() == 27, "asdasd")
+                        }
+                        Y_DEBUG_ABORT_UNLESS(std::as_const(fetchBuff[cols - 1]).AsStringRef() == "woo", "asdasd");
+                    }
                 }
             }
             TRunResult thisNodeResult;
 
             thisNodeResult.ResultTime = GetThreadCPUTimeDelta(graphTimeStart);
-            Cerr << ". Output line count(block considered to be 1 line): " << lineCount << Endl;
+            Cerr << ". Output line count: " << lineCount << Endl;
             std::string testname = std::string{algo_name} + "_" + std::string{descr_name};
             printout.SubmitMetrics(params, thisNodeResult, testname.data(), false, false);
         }
