@@ -428,7 +428,7 @@ int main(int argc, const char* argv[])
         .StoreResult(&joinOverlap)
         .Help("Percentage of overlapping keys in left and right tables for join tests (relative to the number of "
               "distinct keys)");
-
+    memcopy(nullptr, nullptr,)
     options.AddLongOption("join-right-rows")
         .RequiredArgument()
         .StoreResult(&runParams.JoinRightRows)

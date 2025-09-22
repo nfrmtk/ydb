@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <ydb/library/yql/dq/comp_nodes/ut/utils/utils.h>
 #include <yql/essentials/minikql/mkql_node_cast.h>
-
+#include <ranges>
 namespace NKikimr::NMiniKQL {
 
 namespace {
@@ -31,6 +31,23 @@ struct TRenames {
     TVector<const ui32> Left;
     TVector<const ui32> Right;
 };
+TRenames MakeRenames(int leftTupleSize, int rightTupleSize, TArrayRef<const ui32> rightKeyColumns){
+    TRenames ret{};
+    for (int index = 0; index < leftTupleSize; ++index) {
+        ret.Left.push_back(index);
+        ret.Left.push_back(index);
+    }
+
+    for (int index = 0; index < rightTupleSize; ++index) {
+        if (std::ranges::find(rightKeyColumns, index) == rightKeyColumns.end()){
+            int rightSize = std::ssize(ret.Right) / 2;
+            ret.Right.push_back(rightSize);
+            ret.Right.push_back(rightSize + std::ssize(ret.Left) / 2);
+        }
+    }
+    return ret;
+
+}
 
 TRenames MakeScalarMapJoinRenames(int leftSize, int rightDictValueSize) {
     TRenames ret{};
@@ -47,16 +64,112 @@ TRenames MakeScalarMapJoinRenames(int leftSize, int rightDictValueSize) {
     return ret;
 }
 
+
 void SetEntryPointValues(IComputationGraph& g, NYql::NUdf::TUnboxedValue left, NYql::NUdf::TUnboxedValue right) {
     TComputationContext& ctx = g.GetContext();
     g.GetEntryPoint(0, false)->SetValue(ctx, std::move(left));
     g.GetEntryPoint(1, false)->SetValue(ctx, std::move(right));
+}
+constexpr EJoinKind kInnerJoin = EJoinKind::Inner;
+struct TJoinArgs {
+    TRuntimeNode Left;
+    TRuntimeNode Right;
+    std::vector<TNode*> Entrypoints;
+};
+
+TRuntimeNode AsTupleListArg(TArrayRef<TType* const> columns, TProgramBuilder& pb){
+    return pb.Arg(pb.NewListType(pb.NewTupleType(columns)));
+}
+
+TRuntimeNode AsBlockTupleListArg(TArrayRef<TType* const> columns, TProgramBuilder& pb){
+    return pb.Arg(pb.NewListType(MakeBlockTupleType(pb, pb.NewTupleType(columns), false)));
+}
+
+
+
+TJoinArgs MakeScalarArgs(const TInnerJoinDescription& descr) {
+    TJoinArgs ret;
+    ret.Left = AsTupleListArg(descr.LeftSource.ColumnTypes, descr.Setup->GetDqProgramBuilder());
+    ret.Right = AsTupleListArg(descr.RightSource.ColumnTypes, descr.Setup->GetDqProgramBuilder());
+    ret.Entrypoints.push_back(ret.Left.GetNode());
+    ret.Entrypoints.push_back(ret.Right.GetNode());
+    return ret;
+}
+
+TVector<TType* const> MakeResultTypesArray(const TInnerJoinDescription& descr){
+    TVector<TType* const> resultTypes;
+    std::ranges::copy(descr.LeftSource.ColumnTypes, std::back_inserter(resultTypes));
+    
+    for (int index = 0; index < std::ssize(descr.RightSource.ColumnTypes); index++){
+        if (std::ranges::find(descr.RightSource.KeyColumnIndexes, index) != descr.RightSource.KeyColumnIndexes.end()){
+            resultTypes.push_back(descr.RightSource.ColumnTypes[index]);
+        }
+    }
+    return resultTypes;
+}
+
+struct TInnerJoinCommonData{
+    TInnerJoinDescription UserInput;
+    TVector<TType* const> ReturnTypes;
+    TJoinArgs Args;
+};
+struct GraceJoinBenchmarkRunner: IJoinBenchmarkRunner{
+    GraceJoinBenchmarkRunner(TInnerJoinCommonData descr):Descr(descr){}
+
+
+    TRuntimeNode BuildRawJoinNode() const {
+        TRenames renames = MakeRenames(std::ssize(Descr.UserInput.LeftSource.ColumnTypes), std::ssize(Descr.UserInput.RightSource.ColumnTypes), Descr.UserInput.RightSource.KeyColumnIndexes); 
+        auto& pb = static_cast<TProgramBuilder&>(Descr.UserInput.Setup->GetDqProgramBuilder());
+        TJoinArgs args= MakeScalarArgs(Descr.UserInput);
+        return pb.GraceJoin(
+        ToWideFlow(pb, args.Left), ToWideFlow(pb, args.Right), kInnerJoin, Descr.UserInput.LeftSource.KeyColumnIndexes,
+        Descr.UserInput.RightSource.KeyColumnIndexes, renames.Left,renames.Right, pb.NewFlowType(pb.NewMultiType( Descr.ReturnTypes)));
+    }
+
+    THolder<IComputationGraph> MakeGraphFor(TRuntimeNode join) const{
+        THolder<IComputationGraph> graph = Descr.UserInput.Setup->BuildGraph(join, Descr.Args.Entrypoints);
+
+        SetEntryPointValues(*graph,Descr.UserInput.LeftSource.ValuesList,Descr.UserInput.RightSource.ValuesList);
+
+
+        return graph;
+    }
+
+    void SkipValuesOf(IComputationGraph& flowGraph){
+        auto flowValues = flowGraph.GetValue();
+        
+    }
+
+    TVector<NUdf::TUnboxedValue> TuplesSlow() const override{
+        return {};
+    }
+
+    void RunFast() const override{
+        auto joinGraph = MakeGraphFor(BuildRawJoinNode());
+    }
+    const TInnerJoinCommonData Descr;
+
 }
 
 } // namespace
 
 bool IsBlockJoin(ETestedJoinAlgo kind) {
     return kind == ETestedJoinAlgo::kBlockHash || kind == ETestedJoinAlgo::kBlockMap;
+}
+
+std::unique_ptr<IJoinBenchmarkRunner> IJoinBenchmarkRunner::Make(ETestedJoinAlgo algo, TInnerJoinDescription descr){
+    switch (algo){
+    case NKikimr::NMiniKQL::ETestedJoinAlgo::kScalarGrace: {
+        return std::make_unique<GraceJoinBenchmarkRunner>( TInnerJoinCommonData{descr, MakeResultTypesArray(descr), MakeScalarArgs(descr)});
+    }
+
+    case ETestedJoinAlgo::kScalarMap:
+    case ETestedJoinAlgo::kBlockMap:
+    case ETestedJoinAlgo::kBlockHash:
+    case ETestedJoinAlgo::kScalarHash:
+    default:
+        Y_ABORT("unimplemented");
+    }
 }
 
 THolder<IComputationGraph> ConstructInnerJoinGraphStream(ETestedJoinAlgo algo, TInnerJoinDescription descr) {
@@ -83,11 +196,6 @@ THolder<IComputationGraph> ConstructInnerJoinGraphStream(ETestedJoinAlgo algo, T
         }
     }
 
-    struct TJoinArgs {
-        TRuntimeNode Left;
-        TRuntimeNode Right;
-        std::vector<TNode*> Entrypoints;
-    };
 
     const bool kNotScalar = false;
 
@@ -124,7 +232,7 @@ THolder<IComputationGraph> ConstructInnerJoinGraphStream(ETestedJoinAlgo algo, T
         SetEntryPointValues(*graph, descr.LeftSource.ValuesList, descr.RightSource.ValuesList);
         return graph;
     }
-    case NKikimr::NMiniKQL::ETestedJoinAlgo::kScalarMap: {
+    case ETestedJoinAlgo::kScalarMap: {
         Y_ABORT_IF(descr.RightSource.KeyColumnIndexes.size() > 1,
                    "composite key types are not supported yet for ScalarMapJoin "
                    "benchmark");
