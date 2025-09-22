@@ -352,7 +352,6 @@ int main(int argc, const char* argv[])
             }
         })
         .Help("Input data type: string key -> ui64 numeric value or ui64 numeric key -> ui64 numeric value");
-
     options.AddLongOption("hashmap")
         .Choices({"std", "absl", "robinhood"})
         .RequiredArgument()

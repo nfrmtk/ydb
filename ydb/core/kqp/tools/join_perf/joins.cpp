@@ -1,6 +1,7 @@
 #include "joins.h"
 #include "construct_join_graph.h"
-#include "factories.h"
+#include <ydb/core/kqp/tools/combiner_perf/factories.h>
+
 #include <ranges>
 #include <ydb/library/yql/dq/comp_nodes/ut/utils/utils.h>
 #include <yql/essentials/minikql/computation/mkql_computation_node_holders.h>
@@ -55,7 +56,7 @@ int LineSize(NKikimr::NMiniKQL::ETestedJoinAlgo algo, std::span<const NYql::NUdf
 
 } // namespace
 
-void NKikimr::NMiniKQL::RunJoinsBench(const TRunParams& params, TTestResultCollector& printout) {
+void NKikimr::NMiniKQL::NJoinBenchmarks::RunJoinsBench(const TBenchmarkParams& params, std::function<void(const TBenchmarkCaseResult&)> callback) {
     Y_UNUSED(params);
     namespace NYKQL = NKikimr::NMiniKQL;
     TRunResult finalResult;
@@ -63,15 +64,22 @@ void NKikimr::NMiniKQL::RunJoinsBench(const TRunParams& params, TTestResultColle
 
     const TVector<const ui32> keyColumns{0};
 
-    TVector<std::pair<NYKQL::ETestedJoinAlgo, std::string_view>> algos = {
-        {NYKQL::ETestedJoinAlgo::kScalarGrace, "ScalarGrace"}, {NYKQL::ETestedJoinAlgo::kScalarMap, "ScalarMap"},
-        {NYKQL::ETestedJoinAlgo::kBlockMap, "BlockMap"},
-        //         {NYKQL::ETestedJoinAlgo::kScalarHash, "ScalarHash"}, // hash joins are not ready yet - they require
-        //         {NYKQL::ETestedJoinAlgo::kBlockHash, "BlockHash"}, // same schema for left and right tables as they
-        //         just spit left then right
-    };
+    // TVector<std::pair<NYKQL::ETestedJoinAlgo, TString>> algo_names = {
+    //     {NYKQL::ETestedJoinAlgo::kScalarGrace, "ScalarGrace"}, {NYKQL::ETestedJoinAlgo::kScalarMap, "ScalarMap"},
+    //     {NYKQL::ETestedJoinAlgo::kBlockMap, "BlockMap"},
+    //     {NYKQL::ETestedJoinAlgo::kScalarHash, "ScalarHash"}, // hash joins are not ready yet - they require
+    //     {NYKQL::ETestedJoinAlgo::kBlockHash, "BlockHash"}, // same schema for left and right tables as they
+    //     //         just spit left then right
+    // };
+    // TVector<std::pair<NYKQL::ETestedJoinKeyType, TString>> enum_names = {
+    //     {NYKQL::ETestedJoinKeyType::kString, "String"},
+    //     {NYKQL::ETestedJoinKeyType::kInteger, "Integer"},
+    // };
+    
     const int bigSize = 1 << 9;
     const int smallSize = bigSize >> 7;
+    const int leftSeed = 123;
+    const int rightSeed = 111;
     auto addStringAndIntInputs = [&](TVector<std::pair<NYKQL::TInnerJoinDescription, std::string>>& all, int leftSize,
                                      int rightSize, std::string name) {
         Cout << "Adding " << name << "test cases" << Endl;
@@ -92,8 +100,25 @@ void NKikimr::NMiniKQL::RunJoinsBench(const TRunParams& params, TTestResultColle
         addStringAndIntInputs(scaled_inputs, leftSize, smallSize * scale, Sprintf("BigLeft_%i", leftSize));
     }
 
-    for (auto [algo, algo_name] : algos) {
-        for (auto [descr, descr_name] : scaled_inputs) {
+    for (auto algo: params.Algorithms) {
+        for (auto keyType : params.KeyTypes) {
+            for (auto keyPreset: params.Presets){
+                for (auto sizes: keyPreset.Cases){
+
+                
+            TInnerJoinDescription descr = [&]{
+                using enum ETestedJoinKeyType;
+                switch(keyType){
+                    case kString:{
+                        return PrepareDescription(&setup,GenerateStringKeyColumn(sizes.Left, 123),GenerateStringKeyColumn(sizes.Right, 111));
+                    }
+                    case kInteger:{
+                        return PrepareDescription(&setup,GenerateIntegerKeyColumn(sizes.Left, 123),GenerateIntegerKeyColumn(sizes.Right, 111));
+                    }
+                    default:
+                    Y_ABORT("unreachable");
+                }
+            }();
             descr.LeftSource.KeyColumnIndexes = keyColumns;
             descr.RightSource.KeyColumnIndexes = keyColumns;
 
@@ -102,7 +127,8 @@ void NKikimr::NMiniKQL::RunJoinsBench(const TRunParams& params, TTestResultColle
             std::vector<NYql::NUdf::TUnboxedValue> fetchBuff;
             ui32 cols = NKikimr::NMiniKQL::ResultColumnCount(algo, descr);
             fetchBuff.resize(cols);
-            Cerr << "Compute graph result for algorithm '" << algo_name << "' and input data '" << descr_name << "'";
+            auto name = CaseName(algo, keyType,keyPreset,sizes);
+            Cerr << "Compute graph result for algorithm '" <<  << "'";
 
             NYql::NUdf::EFetchStatus fetchStatus;
             i64 lineCount = 0;
@@ -117,8 +143,10 @@ void NKikimr::NMiniKQL::RunJoinsBench(const TRunParams& params, TTestResultColle
 
             thisNodeResult.ResultTime = GetThreadCPUTimeDelta(graphTimeStart);
             Cerr << ". Output line count(block considered to be 1 line): " << lineCount << Endl;
-            std::string testname = std::string{algo_name} + "_" + std::string{descr_name};
+            callback(TBenchmarkCaseResult{name, sizes});
             printout.SubmitMetrics(params, thisNodeResult, testname.data(), false, false);
+        }
+        }
         }
     }
 }
