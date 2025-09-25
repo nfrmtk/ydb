@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
     opts.AddLongOption('s', "benchmark_sizes")
         .Help("left and right table sizes to choose for joins benchmark. visit NBenchmarkSizes namespace in "
               "benchmark_settings.cpp to see exact values")
-        .Choices({"exp", "linear", "small"})
+        .Choices({"exp", "linear", "small", "sampling_linear"})
         .DefaultValue("small")
         .Handler1([&](const NLastGetopt::TOptsParser* option) {
             auto val = TStringBuf(option->CurVal());
@@ -50,6 +50,8 @@ int main(int argc, char** argv) {
                     return {NKikimr::NMiniKQL::NBenchmarkSizes::LinearSizeIncrease(), "LinearGrowth"};
                 } else if (val == "small") {
                     return {NKikimr::NMiniKQL::NBenchmarkSizes::VerySmallSizes(), "VerySmall"};
+                } else if (val == "sampling_linear"){
+                    return {NKikimr::NMiniKQL::NBenchmarkSizes::SamplingSmallLinearSizeIncrease(), "SamplingLinearGrowth"};
                 } else {
                     Y_ABORT("unknown option for benchmark_sizes");
                 }

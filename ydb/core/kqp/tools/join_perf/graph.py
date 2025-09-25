@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import sys
 import os
+import numpy as np
 from pathlib import Path
 if len(sys.argv) < 2:
     print("usage: python3 graph.py folder/file.jsonl")
@@ -24,6 +25,14 @@ for _, obj in j.iterrows():
             'key_type': name_parts[1]
         }
     )
+is_time_sampled = only_needed[0]["input_data_flavour"].startswith("Sampling")
+def geo_mean_5_smallest(series):
+    smallest = series.nsmallest(5)
+    positive = smallest[smallest > 0]
+    if len(positive) == 0:
+        return np.nan
+    return np.exp(np.mean(np.log(positive)))
+
 df = pd.DataFrame(only_needed)
 df = df.drop('run_name', axis=1)
 images_root_base = str(Path.home())+"/.join_perf/images"
@@ -46,9 +55,10 @@ for data_flavour in data_flovours:
         fig, axes = plt.subplots(nrows=1, ncols=1, figsize=(10, 8), sharex=True)
         
         for name, group in subset.groupby('join_algorithm'):
+            group = group.groupby('left_table_size')['time'].apply(lambda x: geo_mean_5_smallest(x)).reset_index(name='unix_bench_time')
             axes.plot(
                 group['left_table_size'], 
-                group['time'], 
+                group['unix_bench_time'], 
                 label=name,
                 marker='o'
             )

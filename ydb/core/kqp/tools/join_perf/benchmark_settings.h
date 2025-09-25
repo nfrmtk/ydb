@@ -31,6 +31,7 @@ namespace NBenchmarkSizes {
 TVector<TTableSizes> ExponentialSizeIncrease();
 TVector<TTableSizes> LinearSizeIncrease();
 TVector<TTableSizes> VerySmallSizes();
+TVector<TTableSizes> SamplingSmallLinearSizeIncrease();
 } // namespace NBenchmarkSizes
 
 } // namespace NKikimr::NMiniKQL

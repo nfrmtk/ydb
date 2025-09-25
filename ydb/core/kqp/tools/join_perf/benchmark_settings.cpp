@@ -56,6 +56,17 @@ TVector<TTableSizes> LinearSizeIncrease() {
     }
     return ret;
 }
+TVector<TTableSizes> SamplingSmallLinearSizeIncrease() {
+    TVector<TTableSizes> ret;
+    int init = 1 << 19;
+    for (int index = 1; index < 9; index++) {
+        int thisNum = init * index;
+        for(int _ = 0; _ < 8; ++_){
+            ret.emplace_back(thisNum, thisNum);
+        }
+    }
+    return ret;
+}
 
 TVector<TTableSizes> VerySmallSizes() {
     return {{512, 512}, {1024, 1024}};
