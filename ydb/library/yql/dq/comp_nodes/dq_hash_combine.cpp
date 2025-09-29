@@ -1050,7 +1050,11 @@ public:
 
     NUdf::EFetchStatus WideFetch(NUdf::TUnboxedValue* output, ui32 width) override {
         auto& state = UnboxedState;
-
+        static bool yielded = false;
+        if (!yielded){
+            return NUdf::EFetchStatus::Yield;
+            yielded = true;
+        }
         for (;;) {
             if (!state.IsDraining()) {
                 if (state.IsSourceEmpty()) {
