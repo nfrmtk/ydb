@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
                        NKikimr::NMiniKQL::ETestedInputFlavour::kSameSizeTable};
     params.Algorithms = {
         // NKikimr::NMiniKQL::ETestedJoinAlgo::kBlockMap,
-        NKikimr::NMiniKQL::ETestedJoinAlgo::kBlockHash,
+        // NKikimr::NMiniKQL::ETestedJoinAlgo::kBlockHash,
         // NKikimr::NMiniKQL::ETestedJoinAlgo::kScalarMap, // slow
         NKikimr::NMiniKQL::ETestedJoinAlgo::kScalarHash,
         // NKikimr::NMiniKQL::ETestedJoinAlgo::kScalarGrace,

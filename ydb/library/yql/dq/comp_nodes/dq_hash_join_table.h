@@ -2,7 +2,7 @@
 #include "type_utils.h"
 #include <util/string/printf.h>
 #include <yql/essentials/minikql/comp_nodes/mkql_rh_hash.h>
-
+#include <absl/container/flat_hash_map.h>
 namespace NKikimr::NMiniKQL::NJoinTable {
 
 using TTuple = const NYql::NUdf::TUnboxedValue*;
@@ -76,7 +76,7 @@ class TStdJoinTable {
     const int TupleSize;
     const bool TrackUnusedTuples;
     std::vector<NYql::NUdf::TUnboxedValue> Tuples;
-    std::unordered_map<TTuple, TuplesWithSameJoinKey, NKikimr::NMiniKQL::TWideUnboxedHasher,
+    absl::flat_hash_map<TTuple, TuplesWithSameJoinKey, NKikimr::NMiniKQL::TWideUnboxedHasher,
                        NKikimr::NMiniKQL::TWideUnboxedEqual>
         BuiltTable;
 };

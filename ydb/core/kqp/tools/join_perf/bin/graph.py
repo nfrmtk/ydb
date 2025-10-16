@@ -7,6 +7,9 @@ import os
 import numpy as np
 import math
 from pathlib import Path
+import git
+repo = git.Repo(search_parent_directories=True)
+sha = repo.head.object.hexsha
 if len(sys.argv) < 2:
     print("usage: python3 graph.py folder/file.jsonl")
     sys.exit(1)
@@ -59,7 +62,7 @@ for data_flavour in data_flavours:
         subset = df[(df["input_data_flavour"] == data_flavour) & 
             (df["key_type"] == key_type)]
         print(subset['preset'].iloc[0])
-        graph_name = str(subset['preset'].iloc[0]) + "_" + data_flavour + "_" + key_type
+        graph_name = str(subset['preset'].iloc[0]) + "_" + data_flavour + "_" + key_type + f"_git-sha:{sha}"
         fig, axes = plt.subplots(nrows=1, ncols=1, figsize=(10, 8), sharex=True)
         
         for name, group in subset.groupby('join_algorithm'):
