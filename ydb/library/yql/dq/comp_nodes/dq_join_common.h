@@ -205,7 +205,61 @@ template <typename Source, EJoinKind Kind> class TJoin : public TComputationValu
 
     Source Build_;
     Source Probe_;
-    NJoinTable::TStdJoinTable Table_;
+    std::vector<IBlockLayoutConverter::TPackResult> BuildResults_;
+    NJoinTable::TStdUVJoinTable Table_;
 };
+
+template <typename Source>
+class TInnerJoinTupleFormat: public TComputationValue<TInnerJoinTupleFormat<Source>> {
+    using TBase = TComputationValue<TInnerJoinTupleFormat>;
+
+    using TableType = NJoinTable::TStdInnerFormatJoinTable<NPackedTuple::TTupleLayoutSIMD<NSimd::TSimdAVX2Traits>>;
+    TInnerJoinTupleFormat(TMemoryUsageInfo* memInfo, Source probe, Source build, TJoinMetadata meta, NUdf::TLoggerPtr logger,
+          TString componentName)
+        : TBase(memInfo)
+        , Meta_(meta)
+        , Logger_(logger)
+        , LogComponent_(logger->RegisterComponent(componentName))
+        , Build_(std::move(build))
+        , Probe_(std::move(probe))
+        , Table_(std::nullopt)
+        {}
+
+    int ProbeSize() const {
+        return Probe_.UserDataSize();
+    }
+
+    int BuildSize() const {
+        return Build_.UserDataSize();
+    }
+    EFetchResult MatchRows(TComputationContext& ctx, auto consumeOneOrTwoTuples) {
+        while (!Build_.Finished()) {
+            auto res = Build_.ForEachRow(ctx, [&](auto tuple) { Table_.Add({tuple, tuple + Build_.UserDataSize()}); });
+            switch (res) {
+            case NYql::NUdf::EFetchStatus::Finish: {
+                Table_.Build();
+                break;
+            }
+            case NYql::NUdf::EFetchStatus::Yield: {
+                return EFetchResult::Yield;
+            }
+            case NYql::NUdf::EFetchStatus::Ok: {
+                break;
+            }
+            default:
+                MKQL_ENSURE(false, "unreachable");
+            }
+        }
+
+    }
+
+    const TJoinMetadata Meta_;
+    const NUdf::TLoggerPtr Logger_;
+    const NUdf::TLogComponentId LogComponent_;
+
+    Source Build_;
+    Source Probe_;
+    std::optional<TableType> Table_;
+}
 
 } // namespace NKikimr::NMiniKQL

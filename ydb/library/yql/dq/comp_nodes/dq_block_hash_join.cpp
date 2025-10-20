@@ -39,6 +39,9 @@ class TBlockRowSource : public NNonCopyable::TMoveOnly {
     }
 
     int UserDataSize() const {
+        return UserDataCols();
+    }
+    int UserDataCols() const {
         return Buff_.size() - 1;
     }
 
@@ -50,7 +53,7 @@ class TBlockRowSource : public NNonCopyable::TMoveOnly {
             }
             return res;
         }
-        const int cols = UserDataSize();
+        const int cols = UserDataCols();
 
         for (int index = 0; index < cols; ++index) {
             Blocks_[index] = &TArrowBlock::From(Buff_[index]).GetDatum();
@@ -77,6 +80,61 @@ class TBlockRowSource : public NNonCopyable::TMoveOnly {
     std::vector<const arrow::Datum*> Blocks_{Buff_.size() - 1};
     std::vector<std::unique_ptr<IBlockReader>> InputReaders{Buff_.size() - 1};
     std::vector<std::unique_ptr<IBlockItemConverter>> InputItemConverters{Buff_.size() - 1};
+};
+
+class TBlockInternalFormatSource: public NNonCopyable::TMoveOnly {
+    TBlockInternalFormatSource(TComputationContext& ctx, IComputationNode* stream, const TVector<TType*>& types, const TVector<ui32>& keyColumns):Stream_(stream), Values_(Stream_->GetValue(ctx)){
+        TVector<NPackedTuple::EColumnRole> roles(types.size(), NPackedTuple::EColumnRole::Payload);
+        for(int keyIndex :keyColumns) {
+            roles[keyIndex] = NPackedTuple::EColumnRole::Key;
+        }
+
+        ArrowBlockToInternalConverter_ = MakeBlockLayoutConverter(TTypeInfoHelper{}, types, roles, &ctx.ArrowMemoryPool);
+    }
+    bool Finished() const {
+        return Finished_;
+    }
+
+    int UserDataSize() const {
+        return UserDataCols();
+    }
+    int UserDataCols() const {
+        return Buff_.size() - 1;
+    }
+
+    FetchResult<IBlockLayoutConverter::TPackResult> FetchRow() {
+        if (Finished()) {
+            return Finish{};
+        }
+        auto res = StreamValues_.WideFetch(Buff_.data(), Buff_.size());
+        if (res != NYql::NUdf::EFetchStatus::Ok) {
+            if (res == NYql::NUdf::EFetchStatus::Finish) {
+                Finished_ = true;
+                return Finish{};
+            }
+            return Yield{};
+        }
+        const size_t cols = UserDataCols();
+        TVector<arrow::Datum> columns = ArrowFromUV({Buff_.data(), cols});
+        IBlockLayoutConverter::TPackResult result;
+        ArrowBlockToInternalConverter_->Pack(columns, result);
+        return One{std::move(result)};
+    }
+
+
+private:
+    TVector<arrow::Datum> ArrowFromUV(std::span<const NYql::NUdf::TUnboxedValue> UVs) {
+        TVector<arrow::Datum> arrow; 
+        for(const auto& uv: UVs) {
+            arrow.push_back(TArrowBlock::From(uv).GetDatum());
+        }   
+        return arrow;
+    }
+    bool Finished_ = false;
+    IComputationNode* Stream_;
+    NYql::NUdf::TUnboxedValue StreamValues_;
+    TUnboxedValueVector Buff_;
+    std::unique_ptr<IBlockLayoutConverter> ArrowBlockToInternalConverter_;
 };
 
 template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputationNode<TBlockHashJoinWrapper<Kind>> {

@@ -7,7 +7,6 @@
 #include <util/generic/buffer.h>
 
 #include <ydb/library/yql/dq/comp_nodes/hash_join_utils/simd/simd.h>
-
 namespace NKikimr {
 namespace NMiniKQL {
 
@@ -203,6 +202,7 @@ struct TTupleLayout {
 
     bool KeysEqual(const ui8 *lhsRow, const ui8 *lhsOverflow, const ui8 *rhsRow, const ui8 *rhsOverflow) const;
     bool KeysLess(const ui8 *lhsRow, const ui8 *lhsOverflow, const ui8 *rhsRow, const ui8 *rhsOverflow) const;
+    size_t Hash(const ui8 *row, const ui8 *overflow) const;
 };
 
 struct TTupleLayoutFallback : public TTupleLayout {

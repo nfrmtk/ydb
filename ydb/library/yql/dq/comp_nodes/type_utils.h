@@ -7,7 +7,8 @@
 
 #include <algorithm>
 #include <vector>
-
+#include <ydb/library/yql/dq/comp_nodes/hash_join_utils/tuple.h>
+#include <ydb/library/yql/dq/comp_nodes/hash_join_utils/block_layout_converter.h>
 namespace NKikimr {
 namespace NMiniKQL {
 
@@ -50,6 +51,47 @@ struct TWideUnboxedHasher {
 
     const TKeyTypes& Types;
 };
+
+struct TTupleAndOverflow{
+    const ui8* Tuple;
+    const ui8* OverflowBegin;
+};
+
+
+template<typename TupleLayout>
+struct TLayoutAndData{
+    TupleLayout Layout;
+    IBlockLayoutConverter::TPackResult Tuples;
+};
+
+
+template<typename Layout>
+struct TTupleEqual {
+    TLayoutAndData<Layout>* Data;
+
+    bool operator()(TTupleAndOverflow lhs, TTupleAndOverflow rhs) const {
+        MKQL_ENSURE(lhs.OverflowBegin == Data->Tuples.Overflow.data() || rhs.OverflowBegin == Data->Tuples.Overflow.data() , "one of two tuples should be from storage");
+        return Data->Layout.KeysEqual(lhs.Tuple, lhs.OverflowBegin, rhs.Tuple, rhs.OverflowBegin);
+    }
+};
+
+struct TTupleHash {
+    NUdf::THashType operator()(TTupleAndOverflow tuple) const {
+        return *reinterpret_cast<const ui32*>(tuple.Tuple);
+    }
+};
+
+struct Yield {};
+struct Finish {};
+
+template <typename Payload>
+struct One{
+    Payload Data;
+};
+
+template<typename Payload>
+using FetchResult = std::variant<Finish, Yield, One<Payload>>;
+
 
 bool UnwrapBlockTypes(const TArrayRef<TType* const>& typeComponents, std::vector<TType*>& result);
 
