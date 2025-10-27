@@ -25,6 +25,7 @@ SRCS(
 CFLAGS(
     -mprfchw
     -mavx2
+    -DARROW_WITH_BACKTRACE
 )
 
 ENDIF()
