@@ -6,12 +6,21 @@
 #include <yql/essentials/minikql/computation/mkql_computation_node.h>
 #include <yql/essentials/minikql/computation/mkql_computation_node_holders.h>
 #include <yql/essentials/minikql/mkql_program_builder.h>
-
+#include <yql/essentials/minikql/computation/mkql_spiller.h>
 namespace NKikimr::NMiniKQL {
 struct TColumnsMetadata {
     std::vector<ui32> KeyColumns;
     std::vector<TType*> ColumnTypes;
 };
+
+int MemoryUsagePercent(int totalBytes) {
+    return 100*totalBytes / TlsAllocState->GetLimit();
+}
+
+bool CanFitMoreInMemory(int moreBytes) {
+    return !TlsAllocState->GetMaximumLimitValueReached() || MemoryUsagePercent(TlsAllocState->GetUsed() + moreBytes) < 40;
+}
+
 
 enum class ESide { Probe, Build };
 
@@ -27,7 +36,6 @@ template <typename T> struct TSides {
         return side == ESide::Build ? Build : Probe;
     }
 };
-
 
 /*
   usage:
@@ -52,6 +60,16 @@ void ForEachSide(std::invocable<ESide> auto fn) {
     fn(ESide::Build);
     fn(ESide::Probe);
 }
+
+// struct TSpilledPage {
+//     ISpiller::TKey PageId;
+// };
+
+// struct TInMemoryPage {
+//     IBlockLayoutConverter::TPackResult PageData;
+// };
+
+// using TPage = std::variant<TSpilledPage, TInMemoryPage>;
 
 struct TJoinMetadata {
     TColumnsMetadata Build;
@@ -122,6 +140,12 @@ template <typename Fun, typename Tuple>
 concept JoinMatchFun = std::invocable<Fun, NJoinTable::TTuple> || std::invocable<Fun, TSides<Tuple>>;
 
 IBlockLayoutConverter::TPackResult Flatten(std::vector<IBlockLayoutConverter::TPackResult> tuples);
+
+template<typename T>
+concept Fetchable = requires (T t) {
+    {t.FetchRow()};
+};
+
 
 template <typename Source, EJoinKind Kind> class TJoin : public TComputationValue<TJoin<Source, Kind>> {
     using TBase = TComputationValue<TJoin>;
@@ -248,71 +272,37 @@ template <typename Source, EJoinKind Kind> class TJoin : public TComputationValu
     NJoinTable::TStdJoinTable Table_;
 };
 
-template <typename Source> class TJoinPackedTuples {
+IBlockLayoutConverter::TPackResult Flatten(std::vector<IBlockLayoutConverter::TPackResult> tuples, const NPackedTuple::TTupleLayout* layout);
+
+
+template <Fetchable ProbeSide> class TJoinPackedTuples {
   public:
     using TTable = NJoinTable::TNeumannJoinTable;
 
-    TJoinPackedTuples(TSides<Source> sources, NUdf::TLoggerPtr logger, TString componentName,
+    TJoinPackedTuples(ProbeSide probeSide, NUdf::TLoggerPtr logger, TString componentName,
                       TSides<const NPackedTuple::TTupleLayout*> layouts)
         : Logger_(logger)
         , LogComponent_(logger->RegisterComponent(componentName))
-        , Sources_(std::move(sources))
+        , ProbeSource_(std::move(probeSide))
+        // , BuildSource_(std::move(buildSide))
         , Layouts_(layouts)
         , Table_(Layouts_.Build)
-    {}
+    {
+    }
 
-    IBlockLayoutConverter::TPackResult Flatten(std::vector<IBlockLayoutConverter::TPackResult> tuples) {
-        IBlockLayoutConverter::TPackResult flattened;
-        flattened.NTuples = std::accumulate(tuples.begin(), tuples.end(), i64{0},
-                                            [](i64 summ, const auto& packRes) { return summ += packRes.NTuples; });
 
-        i64 totalTuplesSize = std::accumulate(tuples.begin(), tuples.end(), i64{0}, [](i64 summ, const auto& packRes) {
-            return summ += std::ssize(packRes.PackedTuples);
-        });
-        flattened.PackedTuples.reserve(totalTuplesSize);
-
-        i64 totaOverflowlSize =
-            std::accumulate(tuples.begin(), tuples.end(), i64{0},
-                            [](i64 summ, const auto& packRes) { return summ += std::ssize(packRes.Overflow); });
-        flattened.Overflow.reserve(totaOverflowlSize);
-
-        int tupleSize = Layouts_.Build->TotalRowSize;
-        for (const IBlockLayoutConverter::TPackResult& tupleBatch : tuples) {
-            Layouts_.Build->Concat(flattened.PackedTuples, flattened.Overflow,
-                                   std::ssize(flattened.PackedTuples) / tupleSize, tupleBatch.PackedTuples.data(),
-                                   tupleBatch.Overflow.data(), tupleBatch.PackedTuples.size() / tupleSize,
-                                   tupleBatch.Overflow.size());
-        }
-        return flattened;
+    void SetBuildSide(IBlockLayoutConverter::TPackResult buildTuples) {
+        Table_.BuildWith(std::move(buildTuples));
     }
 
     EFetchResult MatchRows([[maybe_unused]] TComputationContext& ctx,
                            JoinMatchFun<TTable::Tuple> auto consumeOneOrTwoTuples) {
-        while (!Sources_.Build.Finished()) {
-            FetchResult<IBlockLayoutConverter::TPackResult> var = Sources_.Build.FetchRow();
-            switch (AsStatus(var)) {
-            case NYql::NUdf::EFetchStatus::Finish: {
-                Table_.BuildWith(Flatten(BuildChunks_));
-                break;
-            }
-            case NYql::NUdf::EFetchStatus::Yield: {
-                return EFetchResult::Yield;
-            }
-            case NYql::NUdf::EFetchStatus::Ok: {
-                auto& packResult = std::get<One<IBlockLayoutConverter::TPackResult>>(var);
-                BuildChunks_.push_back(std::move(packResult.Data));
-                break;
-            }
-            default:
-                MKQL_ENSURE(false, "unreachable");
-            }
-        }
         if (Table_.Empty()) {
             return EFetchResult::Finish; // is it ok?
         }
 
-        if (!Sources_.Probe.Finished()) {
-            const FetchResult<IBlockLayoutConverter::TPackResult> var = Sources_.Probe.FetchRow();
+        if (!ProbeSource_.Finished()) {
+            const FetchResult<IBlockLayoutConverter::TPackResult> var = ProbeSource_.FetchRow();
             const NKikimr::NMiniKQL::EFetchResult resEnum = AsResult(var);
 
             if (resEnum == EFetchResult::One) {
@@ -336,7 +326,9 @@ template <typename Source> class TJoinPackedTuples {
   private:
     const NUdf::TLoggerPtr Logger_;
     const NUdf::TLogComponentId LogComponent_;
-    TSides<Source> Sources_;
+    // TSides<Source> Sources_;
+    ProbeSide ProbeSource_;
+    // BuildSide BuildSource_;
     TSides<const NPackedTuple::TTupleLayout*> Layouts_;
     TTable Table_;
     IBlockLayoutConverter::TPackResult BuildData_;

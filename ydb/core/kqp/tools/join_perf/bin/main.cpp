@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
         NKikimr::NMiniKQL::ETestedJoinAlgo::kBlockHash,
         // NKikimr::NMiniKQL::ETestedJoinAlgo::kScalarMap, // slow
         NKikimr::NMiniKQL::ETestedJoinAlgo::kScalarHash,
-        // NKikimr::NMiniKQL::ETestedJoinAlgo::kScalarGrace,
+        NKikimr::NMiniKQL::ETestedJoinAlgo::kScalarGrace,
     };
 
     TString presetName;

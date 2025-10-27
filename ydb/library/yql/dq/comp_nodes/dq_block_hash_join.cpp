@@ -189,8 +189,9 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
             : TBase(memInfo)
             , Meta_(meta)
             , Converters_(std::move(converters))
-            , Join_(TSides<TBlockPackedTupleSource>{.Build = {ctx, streams, meta, Converters_, ESide::Build},
-                                                    .Probe = {ctx, streams, meta, Converters_, ESide::Probe}},
+            , BuildSource_(ctx, streams, meta, converters, ESide::Build)
+            , Join_(
+                    {ctx, streams, meta, Converters_, ESide::Probe},
                     ctx.MakeLogger(), "BlockHashJoin",
                     TSides<const NPackedTuple::TTupleLayout*>{.Build = Converters_.Build->GetTupleLayout(),
                                                               .Probe = Converters_.Probe->GetTupleLayout()})
@@ -216,6 +217,28 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
             size_t expectedSize = Meta_->Renames.size() + 1;
             MKQL_ENSURE(width == expectedSize,
                         Sprintf("runtime(%i) vs compile-time(%i) tuple width mismatch", width, expectedSize));
+            while (!BuildSource_.Finished()) { 
+                // if (Source_.Build.NextPackResultSizeBytes() + TlsAllocState->GetAllocated() > ) 
+                FetchResult<IBlockLayoutConverter::TPackResult> var = BuildSource_.FetchRow();
+                switch (AsStatus(var)) {
+                case NYql::NUdf::EFetchStatus::Finish: {
+
+                    Join_.SetBuildSide(Flatten(std::move(BuildChunks_), Converters_.Build->GetTupleLayout()));
+                    break;
+                }
+                case NYql::NUdf::EFetchStatus::Yield: {
+                    return NYql::NUdf::EFetchStatus::Yield;
+                }
+                case NYql::NUdf::EFetchStatus::Ok: {
+                    auto& packResult = std::get<One<IBlockLayoutConverter::TPackResult>>(var);
+                    BuildChunks_.push_back(std::move(packResult.Data));
+                    break;
+                }
+                default:
+                    MKQL_ENSURE(false, "unreachable");
+                }
+            }
+
             if (Finished_) {
                 return NYql::NUdf::EFetchStatus::Finish;
             }
@@ -241,6 +264,10 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
       private:
         const TDqBlockJoinMetadata* Meta_;
         TSides<std::unique_ptr<IBlockLayoutConverter>> Converters_;
+        TBlockPackedTupleSource BuildSource_;
+        std::vector<IBlockLayoutConverter::TPackResult> BuildChunks_;
+        // IComputationNode* BuildStreamNode_;
+        // NYql::NUdf::TUnboxedValue BuildTuples_;
         JoinType Join_;
         TComputationContext* Ctx_;
         TRenamesPackedTupleOutput Output_;
