@@ -70,6 +70,8 @@ class TNeumannHashTable {
     /// hash = [...] [directory_bits] [...] [bloom_filter_bits]
     using Hash = ui32;
     using TBloom = ui16;
+    TNeumannHashTable(TNeumannHashTable&& other) = default;
+    TNeumannHashTable& operator=(TNeumannHashTable&& other) = default;
 
     static constexpr unsigned kBloomBits = 16;
     static constexpr unsigned kBloomMaskBits = 4;
@@ -491,6 +493,9 @@ class TNeumannHashTable {
 
         Tuples_ = nullptr;
         Overflow_ = nullptr;
+    }
+    const TTupleLayout* Layout() const {
+        return Layout_;
     }
 
   private:

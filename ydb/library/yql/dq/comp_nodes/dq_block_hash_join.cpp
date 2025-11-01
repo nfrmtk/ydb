@@ -47,7 +47,11 @@ class TBlockPackedTupleSource : public NNonCopyable::TMoveOnly {
         return Buff_.size() - 1;
     }
 
-    FetchResult<IBlockLayoutConverter::TPackResult> FetchRow() {
+    const NPackedTuple::TTupleLayout* Layout() const {
+        return ArrowBlockToInternalConverter_->GetTupleLayout();
+    }
+
+    FetchResult<IBlockLayoutConverter::TPackResult> Fetch() {
         if (Finished()) {
             return Finish{};
         }
@@ -80,7 +84,21 @@ class TBlockPackedTupleSource : public NNonCopyable::TMoveOnly {
     NYql::NUdf::TUnboxedValue StreamValues_;
     TUnboxedValueVector Buff_;
     IBlockLayoutConverter* ArrowBlockToInternalConverter_;
+    // std::optional<TArrowRows> FetchedRows_;
+    // TBucketsPackedTupleStorage<Settings>* Storage_;
 };
+
+
+
+
+
+
+
+
+bool AllInMemory(const TBuckets& buckets) {
+    return !std::ranges::find(buckets, true, [](const TBucket& bucket){return bucket.IsSpilled;});
+}
+
 
 struct TRenamesPackedTupleOutput : NNonCopyable::TMoveOnly {
     TRenamesPackedTupleOutput(const TDqBlockJoinMetadata* meta, TSides<IBlockLayoutConverter*> converters)
@@ -97,8 +115,8 @@ struct TRenamesPackedTupleOutput : NNonCopyable::TMoveOnly {
     }
 
     struct PackedTuplesData {
-        std::vector<ui8, TMKQLAllocator<ui8>> PackedTuples;
-        std::vector<ui8, TMKQLAllocator<ui8>> Overflow;
+        TMKQLVector<ui8> PackedTuples;
+        TMKQLVector<ui8> Overflow;
     };
 
     struct TuplePairs {
@@ -137,8 +155,7 @@ struct TRenamesPackedTupleOutput : NNonCopyable::TMoveOnly {
             res.Overflow = std::move(Output_.Data.SelectSide(side).Overflow);
             Converters_.SelectSide(side)->Unpack(res, out.SelectSide(side));
         };
-        fillSide(ESide::Build);
-        fillSide(ESide::Probe);
+        ForEachSide(fillSide);
 
         Output_.NItems = 0;
         return out;
@@ -149,9 +166,44 @@ struct TRenamesPackedTupleOutput : NNonCopyable::TMoveOnly {
     TSides<IBlockLayoutConverter*> Converters_;
 };
 
+constexpr TPackedTupleStorageSettings RuntimeStorageSettings{.Buckets = 128, .BucketSizeBytes = (1<<19)};
+
 template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputationNode<TBlockHashJoinWrapper<Kind>> {
   private:
     using TBaseComputation = TMutableComputationNode<TBlockHashJoinWrapper>;
+        struct FetchingBuildSide {
+            TPackedTupleBucketStorage<RuntimeStorageSettings, TBlockPackedTupleSource<RuntimeStorageSettings>> Fetcher;
+        };
+
+        struct StreamingProbeSide {
+
+            TStreamProbeThroughTable<TBlockPackedTupleSource<RuntimeStorageSettings>> InMemoryStream_;
+        };
+
+        struct SpilledBucket {
+            TBucket Bucket;
+            int BucketIndex;
+        };
+        struct PartiallyStreamingProbeSide {
+            TMKQLVector<SpilledBucket> SpilledBuildBuckets;
+            IBlockLayoutConverter::TPackResult InMemoryBuildSide;
+            enum IsInMemory: bool {
+                Spilled,
+                InMemory,
+            };
+            TMKQLVector<IsInMemory> BucketsStatus;
+        };
+
+        struct PairsOfSpilledBuckets {
+            TSides<TBucket> SpilledPages;
+            int BucketIndex;
+        };
+
+        struct StreamingBuckets {
+            PairsOfSpilledBuckets SpilledBuildBuckets;
+        };
+
+        struct Finished{};
 
   public:
     TBlockHashJoinWrapper(TComputationMutables& mutables, TDqBlockJoinMetadata meta, TSides<IComputationNode*> streams)
@@ -218,27 +270,89 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
                         Sprintf("runtime(%i) vs compile-time(%i) tuple width mismatch", width, expectedSize));
             if (Finished_) {
                 return NYql::NUdf::EFetchStatus::Finish;
-            }
-            while (Output_.SizeTuples() < Threshold_) {
-                auto res = Join_.MatchRows(*Ctx_, Output_.MakeConsumeFn());
-                switch (res) {
-                case EFetchResult::Finish: {
-                    if (Output_.SizeTuples() == 0) {
-                        return NYql::NUdf::EFetchStatus::Finish;
+            } else if (FetchingBuildSide* ptr = std::get_if<FetchingBuildSide>(&State_)) {
+                FetchResult<TBuckets> res = ptr->Fetcher.FetchSide();
+                switch (AsStatus(res)) {
+
+                case NYql::NUdf::EFetchStatus::Ok: {
+                    TBuckets& buckets = GetPayload(res);
+                    if (AllInMemory(buckets)) {
+                        TMKQLVector<IBlockLayoutConverter::TPackResult> inMemoryPages;
+                        for(auto& bucket: buckets) {
+                            MKQL_ENSURE(!bucket.IsSpilled, "spilled bucket in happy path?");
+                            MKQL_ENSURE(bucket.SpilledPages.empty(), "spilled pages bucket in happy path?");
+                            inMemoryPages.push_back(bucket.DetatchBuildingPage());
+                            std::move(bucket.InMemoryPages.begin(), bucket.InMemoryPages.end(), std::back_inserter(inMemoryPages));
+                        }
+                        State_ = StreamingProbeSide{Flatten(std::move(inMemoryPages))};
+                        return WideFetch(output, width);
+                    } else {
+                        // PartiallyStreamingProbeSide build{};
+                        TMKQLVector<SpilledBucket> spilledBuckets;
+                        TMKQLVector<TPackResult> inMemoryPages;
+                        TMKQLVector<typename PartiallyStreamingProbeSide::IsInMemory> status;
+                        for(int index = 0; index < std::ssize(buckets); ) {
+                            TBucket& bucket = buckets[index];
+                            if (bucket.IsSpilled) {
+                                spilledBuckets.emplace_back(std::move(bucket), index);
+                                status.push_back(PartiallyStreamingProbeSide::IsInMemory::Spilled);
+                            } else {
+                                inMemoryPages.push_back(bucket.DetatchBuildingPage());
+                                std::move(bucket.InMemoryPages.begin(), bucket.InMemoryPages.end(), std::back_inserter(inMemoryPages));
+                                status.push_back(PartiallyStreamingProbeSide::IsInMemory::InMemory);
+                            }
+                        }
+                        
+                        State_.emplace(PartiallyStreamingProbeSide{
+                            .SpilledBuildBuckets = std::move(spilledBuckets), 
+                            .InMemoryBuildSide = Flatten(std::move(inMemoryPages)), 
+                            .BucketsStatus = std::move(status)});
+                        // State_ = std::move(build);
+                        return WideFetch(output, width);
                     }
-                    Finished_ = true;
-                    return FlushTo(output);
                 }
-                case EFetchResult::Yield:
+                case NYql::NUdf::EFetchStatus::Finish:
+                    MKQL_ENSURE(false, "unreachable");
+                case NYql::NUdf::EFetchStatus::Yield:
                     return NYql::NUdf::EFetchStatus::Yield;
-                case EFetchResult::One:
-                    break;
+                  break;
                 }
+            } else if (StreamingProbeSide* ptr = std::get_if<StreamingProbeSide>(&State_)) {
+                TPackResult & tableData = *ptr->InMemoryBuildSide;
+                // tableData.
+                return WideFetch(output, width);
+            } else if (PartiallyStreamingProbeSide* ptr = std::get_if<PartiallyStreamingProbeSide>(&State_)) {
             }
-            return FlushTo(output);
+            // auto var = BuildStorage_.FetchSide();
+            // switch (AsStatus(var)) {
+
+            // case NYql::NUdf::EFetchStatus::Ok:
+                
+            // case NYql::NUdf::EFetchStatus::Finish:
+            // case NYql::NUdf::EFetchStatus::Yield:
+            //   break;
+            // }
+            // while (Output_.SizeTuples() < Threshold_) {
+            //     auto res = Join_.MatchRows(*Ctx_, Output_.MakeConsumeFn());
+            //     switch (res) {
+            //     case EFetchResult::Finish: {
+            //         if (Output_.SizeTuples() == 0) {
+            //             return NYql::NUdf::EFetchStatus::Finish;
+            //         }
+            //         Finished_ = true;
+            //         return FlushTo(output);
+            //     }
+            //     case EFetchResult::Yield:
+            //         return NYql::NUdf::EFetchStatus::Yield;
+            //     case EFetchResult::One:
+            //         break;
+            //     }
+            // }
+            // return FlushTo(output);
         }
 
       private:
+        std::variant<FetchingBuildSide, StreamingProbeSide, PartiallyStreamingProbeSide, StreamingBuckets, Finished> State_;
         const TDqBlockJoinMetadata* Meta_;
         TSides<std::unique_ptr<IBlockLayoutConverter>> Converters_;
         JoinType Join_;

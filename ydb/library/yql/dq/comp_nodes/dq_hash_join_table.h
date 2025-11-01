@@ -90,6 +90,8 @@ class TNeumannJoinTable : NNonCopyable::TMoveOnly {
         const ui8* PackedData;
         const ui8* OverflowBegin;
     };
+    TNeumannJoinTable(TNeumannJoinTable&& table) = default;
+    TNeumannJoinTable& operator=(TNeumannJoinTable&& table) = default;
 
     TNeumannJoinTable(const NPackedTuple::TTupleLayout* layout)
         : Table_(layout)
@@ -103,6 +105,9 @@ class TNeumannJoinTable : NNonCopyable::TMoveOnly {
 
     bool Empty() {
         return Table_.Empty();
+    }
+    const NPackedTuple::TTupleLayout* Layout() const {
+        return Table_.Layout();
     }
 
     void Lookup(Tuple row, std::invocable<Tuple> auto consume) const {
