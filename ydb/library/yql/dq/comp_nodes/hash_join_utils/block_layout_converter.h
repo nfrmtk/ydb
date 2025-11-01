@@ -16,6 +16,10 @@ public:
         std::vector<ui8, TMKQLAllocator<ui8>> Overflow;
         int NTuples{0};
     };
+    struct PackSize {
+        int64_t PackedTupleSizeBytes;
+        int64_t OverflowSizeBytes;
+    };
 
     using TPackedTuple = std::vector<ui8, TMKQLAllocator<ui8>>;
     using TOverflow = std::vector<ui8, TMKQLAllocator<ui8>>;
@@ -34,6 +38,8 @@ public:
     // virtual void UnpackApply(const TPackResult& packed, std::function<void(const char*)>);
     virtual const NPackedTuple::TTupleLayout* GetTupleLayout() const = 0;
 };
+
+int64_t PackResultSizeBytes(const IBlockLayoutConverter::TPackResult& res);
 
 IBlockLayoutConverter::TPtr MakeBlockLayoutConverter(
     const NUdf::ITypeInfoHelper& typeInfoHelper, const TVector<TType*>& types,

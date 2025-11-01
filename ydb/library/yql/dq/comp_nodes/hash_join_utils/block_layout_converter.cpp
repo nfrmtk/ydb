@@ -490,6 +490,11 @@ private:
     TType* Type_;
 };
 
+int64_t PackResultSizeBytes(const IBlockLayoutConverter::TPackResult& res) {
+    return res.PackedTuples.capacity() + res.Overflow.capacity();
+}
+
+
 // ------------------------------------------------------------
 
 struct TColumnDataExtractorTraits {
@@ -606,6 +611,12 @@ public:
 
         TupleLayout_ = NPackedTuple::TTupleLayout::Create(columnDescrs);
     }
+
+    // PackSize CalculatePackSize(const TVector<arrow::Datum>& columns) const {
+    //     PackSize res;
+    //     res.PackedTupleSizeBytes = TupleLayout_->TotalRowSize * columns.front().length();
+    //     res.OverflowSizeBytes = 
+    // } 
 
     void Pack(const TVector<arrow::Datum>& columns, TPackResult& packed) override {
         auto [columnsData, columnsNullBitmap] = GetColumns_(columns);

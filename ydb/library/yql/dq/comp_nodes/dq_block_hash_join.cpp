@@ -1,4 +1,3 @@
-
 #include "dq_block_hash_join.h"
 
 #include <yql/essentials/minikql/comp_nodes/mkql_blocks.h>
@@ -27,7 +26,20 @@ struct TDqBlockJoinMetadata {
     TVector<TBlockType*> ResultItemTypes;
     TDqJoinImplRenames Renames;
 };
+TVector<arrow::Datum> ArrowFromUV(std::span<const NYql::NUdf::TUnboxedValue> UVs) {
+    TVector<arrow::Datum> arrow;
+    for (const auto& uv : UVs) {
+        arrow.push_back(TArrowBlock::From(uv).GetDatum());
+    }
+    return arrow;
+}
+TVector<arrow::Datum> ArrowFromUV(const NYql::NUdf::TUnboxedValue* first, size_t size) {
+    return ArrowFromUV({first, size});
+}
 
+using TArrowRows = TVector<arrow::Datum>;
+
+template<TPackedTupleStorageSettings Settings>
 class TBlockPackedTupleSource : public NNonCopyable::TMoveOnly {
   public:
     TBlockPackedTupleSource(TComputationContext& ctx, TSides<IComputationNode*> stream,
@@ -47,39 +59,68 @@ class TBlockPackedTupleSource : public NNonCopyable::TMoveOnly {
         return Buff_.size() - 1;
     }
 
-    FetchResult<IBlockLayoutConverter::TPackResult> FetchRow() {
+    FetchResult<IBlockLayoutConverter::TPackResult> Fetch() {
         if (Finished()) {
             return Finish{};
         }
-        auto res = StreamValues_.WideFetch(Buff_.data(), Buff_.size());
-        if (res != NYql::NUdf::EFetchStatus::Ok) {
-            if (res == NYql::NUdf::EFetchStatus::Finish) {
-                Finished_ = true;
-                return Finish{};
+        if (!FetchedRows_.has_value()) {
+            auto res = StreamValues_.WideFetch(Buff_.data(), Buff_.size());
+            if (res != NYql::NUdf::EFetchStatus::Ok) {
+                if (res == NYql::NUdf::EFetchStatus::Finish) {
+                    Finished_ = true;
+                    return Finish{};
+                }
+                return Yield{};
             }
-            return Yield{};
+            const size_t cols = UserDataCols();
+            FetchedRows_ = ArrowFromUV({Buff_.data(), cols});
         }
-        const size_t cols = UserDataCols();
-        TVector<arrow::Datum> columns = ArrowFromUV({Buff_.data(), cols});
-        IBlockLayoutConverter::TPackResult result;
-        ArrowBlockToInternalConverter_->Pack(columns, result);
-        return One{std::move(result)};
+        auto dontHaveMemoryToPack = [] {
+            return !MemoryPercentIsFree(30);
+        };
+        EFetchResult res = Storage_->SpillWhile(dontHaveMemoryToPack);
+        if (res == EFetchResult::Yield) {
+            return Yield{};
+        } else {
+            IBlockLayoutConverter::TPackResult result;
+            ArrowBlockToInternalConverter_->Pack(*FetchedRows_, result);
+            FetchedRows_ = std::nullopt;
+            return One{std::move(result)};
+        }
     }
 
   private:
-    TVector<arrow::Datum> ArrowFromUV(std::span<const NYql::NUdf::TUnboxedValue> UVs) {
-        TVector<arrow::Datum> arrow;
-        for (const auto& uv : UVs) {
-            arrow.push_back(TArrowBlock::From(uv).GetDatum());
-        }
-        return arrow;
-    }
 
     bool Finished_ = false;
     IComputationNode* Stream_;
     NYql::NUdf::TUnboxedValue StreamValues_;
     TUnboxedValueVector Buff_;
     IBlockLayoutConverter* ArrowBlockToInternalConverter_;
+    std::optional<TArrowRows> FetchedRows_;
+    TBucketsPackedTupleStorage<Settings>* Storage_;
+};
+
+
+// IBlockLayoutConverter::TPackResult Parse( NYql::TChunkedBuffer&& buff) {
+//     IBlockLayoutConverter::TPackResult res{};
+//     res.NTuples = buff.
+//     buff.Append(TStringBuilder() << result.NTuples);
+//     buff.Append(TString{reinterpret_cast<const char*>(result.PackedTuples.data()), result.PackedTuples.size()});
+//     buff.Append(TString{reinterpret_cast<const char*>(result.Overflow.data()), result.Overflow.size()});
+//     return buff;
+// }
+
+
+
+
+
+
+bool AllInMemory(const TBuckets& buckets) {
+    return !std::ranges::find(buckets, true, [](const TBucket& bucket){return bucket.IsSpilled;});
+}
+
+class TBlockPackResultSource {
+
 };
 
 struct TRenamesPackedTupleOutput : NNonCopyable::TMoveOnly {
@@ -109,6 +150,7 @@ struct TRenamesPackedTupleOutput : NNonCopyable::TMoveOnly {
     auto MakeConsumeFn() {
         return [this](TSides<NJoinTable::TNeumannJoinTable::Tuple> tuples) {
             ForEachSide([&](ESide side) {
+                // AppendTupleTo(const NPackedTuple::TTupleLayout *layout, const ui8 *tuple, const IBlockLayoutConverter::TPackResult &from, IBlockLayoutConverter::TPackResult &to)
                 Converters_.SelectSide(side)->GetTupleLayout()->TupleDeepCopy(
                     tuples.SelectSide(side).PackedData, tuples.SelectSide(side).OverflowBegin,
                     Output_.Data.SelectSide(side).PackedTuples, Output_.Data.SelectSide(side).Overflow);
@@ -188,6 +230,7 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
                      TSides<std::unique_ptr<IBlockLayoutConverter>> converters, const TDqBlockJoinMetadata* meta)
             : TBase(memInfo)
             , Meta_(meta)
+            , Streams_(streams)
             , Converters_(std::move(converters))
             , Join_(TSides<TBlockPackedTupleSource>{.Build = {ctx, streams, meta, Converters_, ESide::Build},
                                                     .Probe = {ctx, streams, meta, Converters_, ESide::Probe}},
@@ -196,7 +239,12 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
                                                               .Probe = Converters_.Probe->GetTupleLayout()})
             , Ctx_(&ctx)
             , Output_(meta, {.Build = Converters_.Build.get(), .Probe = Converters_.Probe.get()})
-        {}
+        {
+            ForEachSide([&](ESide side) {
+                Values_.SelectSide(side) = Streams_.SelectSide(side)->GetValue(ctx);
+            });
+
+        }
 
         NUdf::EFetchStatus FlushTo(NUdf::TUnboxedValue* output) {
             MKQL_ENSURE(Output_.SizeTuples() != 0, "make sure we are flushing something, not empty set of tuples");
@@ -216,8 +264,57 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
             size_t expectedSize = Meta_->Renames.size() + 1;
             MKQL_ENSURE(width == expectedSize,
                         Sprintf("runtime(%i) vs compile-time(%i) tuple width mismatch", width, expectedSize));
-            if (Finished_) {
+            if (std::holds_alternative<Finished>(State_)) {
                 return NYql::NUdf::EFetchStatus::Finish;
+            } else if (FetchingBuildSide* ptr = std::get_if<FetchingBuildSide>(&State_)) {
+                FetchResult<TBuckets> res = ptr->Fetcher.FetchSide();
+                switch (AsStatus(res)) {
+
+                case NYql::NUdf::EFetchStatus::Ok: {
+                    TBuckets& buckets = GetPayload(res);
+                    if (AllInMemory(buckets)) {
+                        std::vector<IBlockLayoutConverter::TPackResult> inMemoryPages;
+                        for(auto& bucket: buckets) {
+                            MKQL_ENSURE(!bucket.IsSpilled, "spilled bucket in happy path?");
+                            MKQL_ENSURE(bucket.SpilledPages.empty(), "spilled pages bucket in happy path?");
+                            inMemoryPages.push_back(bucket.DetatchBuildingPage());
+                            std::move(bucket.InMemoryPages.begin(), bucket.InMemoryPages.end(), std::back_inserter(pages));
+                        }
+                        State_ = StreamingProbeSide{Flatten(std::move(inMemoryPages))};
+                        return WideFetch(output, width);
+                    } else {
+                        // std::vector<
+                        PartiallyStreamingProbeSide build{};
+                        std::vector<TPackResult> inMemoryPages;
+                        for(int index = 0; index < std::ssize(buckets); ) {
+                            TBucket& bucket = buckets[index];
+                            if (bucket.IsSpilled) {
+                                build.SpilledBuildBuckets.emplace_back(std::move(bucket), index);
+                            } else {
+                                inMemoryPages.push_back(bucket.DetatchBuildingPage());
+                                std::move(bucket.InMemoryPages.begin(), bucket.InMemoryPages.end(), std::back_inserter(inMemoryPages));
+                            }
+                        }
+                        build.InMemoryBuildSide = Flatten(std::move(inMemoryPages));
+                        State_ = std::move(build);
+                        return WideFetch(output, width);
+                    }
+                }
+                case NYql::NUdf::EFetchStatus::Finish:
+                    MKQL_ENSURE(false, "unreachable");
+                case NYql::NUdf::EFetchStatus::Yield:
+                    return NYql::NUdf::EFetchStatus::Yield;
+                  break;
+                }
+            } 
+            auto var = BuildStorage_.FetchSide();
+            switch (AsStatus(var)) {
+
+            case NYql::NUdf::EFetchStatus::Ok:
+                
+            case NYql::NUdf::EFetchStatus::Finish:
+            case NYql::NUdf::EFetchStatus::Yield:
+              break;
             }
             while (Output_.SizeTuples() < Threshold_) {
                 auto res = Join_.MatchRows(*Ctx_, Output_.MakeConsumeFn());
@@ -239,8 +336,40 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
         }
 
       private:
+        struct FetchingBuildSide {
+            TPackedTupleBucketStorage<TPackedTupleStorageSettings{.Buckets = 128, .BucketSizeBytes = (1<<19)}, TBlockPackedTupleSource<TPackedTupleStorageSettings Settings>> Fetcher;
+        };
+
+        struct StreamingProbeSide {
+            IBlockLayoutConverter::TPackResult InMemoryBuildSide;
+        };
+
+        struct SpilledBucket {
+            TBucket Bucket;
+            int BucketIndex;
+        };
+        struct PartiallyStreamingProbeSide {
+            std::vector<SpilledBucket> SpilledBuildBuckets;
+            IBlockLayoutConverter::TPackResult InMemoryBuildSide;
+        };
+
+        struct PairsOfSpilledBuckets {
+            TSides<TBucket> SpilledPages;
+            int BucketIndex;
+        };
+
+        struct StreamingBuckets {
+            PairsOfSpilledBuckets SpilledBuildBuckets;
+        };
+
+        struct Finished{};
+
+        std::variant<FetchingBuildSide, StreamingProbeSide, PartiallyStreamingProbeSide, StreamingBuckets, Finished> State_;
         const TDqBlockJoinMetadata* Meta_;
+        TSides<IComputationNode*> Streams_;
+        TSides<NYql::NUdf::TUnboxedValue> Values_;
         TSides<std::unique_ptr<IBlockLayoutConverter>> Converters_;
+        // TBlockPackedTupleBucketStorage BuildStorage_;
         JoinType Join_;
         TComputationContext* Ctx_;
         TRenamesPackedTupleOutput Output_;

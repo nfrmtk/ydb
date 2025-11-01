@@ -361,6 +361,11 @@ struct TEmbeddedTupleRowRef {
     ui8* Ptr;
 };
 
+Y_FORCE_INLINE 
+ui32 Hash(const ui8* tuple) {
+    return ReadUnaligned<ui32>(tuple);
+}
+
 template <size_t Size>
 struct TEmbeddedTuple {
     TEmbeddedTuple() {}
