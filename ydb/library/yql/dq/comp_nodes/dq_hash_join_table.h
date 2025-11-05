@@ -84,43 +84,46 @@ class TStdJoinTable {
         BuiltTable;
 };
 
-class TNeumannJoinTable : NNonCopyable::TMoveOnly {
+class TNeumannJoinTable/*: public TMoveOnly*/ {
   public:
     struct Tuple {
         const ui8* PackedData;
         const ui8* OverflowBegin;
     };
-    TNeumannJoinTable(TNeumannJoinTable&& table) = default;
-    TNeumannJoinTable& operator=(TNeumannJoinTable&& table) = default;
 
+    TNeumannJoinTable(TNeumannJoinTable&& ) noexcept = default;
+    TNeumannJoinTable& operator=(TNeumannJoinTable&& ) noexcept = default;
+    TNeumannJoinTable(const TNeumannJoinTable& ) = delete;
+    TNeumannJoinTable& operator=(const TNeumannJoinTable& ) = delete;
+    
     TNeumannJoinTable(const NPackedTuple::TTupleLayout* layout)
-        : Table_(layout)
+        : Table(layout)
     {}
 
     void BuildWith(IBlockLayoutConverter::TPackResult data) {
         BuildData_ = std::move(data);
-        Table_.Build(BuildData_.PackedTuples.data(), BuildData_.Overflow.data(), BuildData_.NTuples);
+        Table.Build(BuildData_.PackedTuples.data(), BuildData_.Overflow.data(), BuildData_.NTuples);
         Built_ = true;
     }
 
     bool Empty() {
-        return Table_.Empty();
+        return Table.Empty();
     }
     const NPackedTuple::TTupleLayout* Layout() const {
-        return Table_.Layout();
+        return Table.Layout();
     }
 
     void Lookup(Tuple row, std::invocable<Tuple> auto consume) const {
         MKQL_ENSURE(Built_, "table must be built before lookup");
-        Table_.Apply(row.PackedData, row.OverflowBegin, [consume, this](const ui8* tuplePackedData) {
+        Table.Apply(row.PackedData, row.OverflowBegin, [consume, this](const ui8* tuplePackedData) {
             consume(Tuple{tuplePackedData, BuildData_.Overflow.data()});
         });
     }
 
+    NKikimr::NMiniKQL::NPackedTuple::TNeumannHashTable<false, false> Table;
   private:
     bool Built_ = false;
     IBlockLayoutConverter::TPackResult BuildData_;
-    NKikimr::NMiniKQL::NPackedTuple::TNeumannHashTable<false, false> Table_;
 };
 
 } // namespace NKikimr::NMiniKQL::NJoinTable

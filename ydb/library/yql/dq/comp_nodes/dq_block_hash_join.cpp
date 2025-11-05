@@ -39,12 +39,12 @@ class TBlockPackedTupleSource : public NNonCopyable::TMoveOnly {
         , ArrowBlockToInternalConverter_(converters.SelectSide(side).get())
     {}
 
-    bool Finished() const {
-        return Finished_;
-    }
 
     int UserDataCols() const {
         return Buff_.size() - 1;
+    }
+    bool Finished() const {
+        return Finished_;
     }
 
     const NPackedTuple::TTupleLayout* Layout() const {
@@ -88,6 +88,8 @@ class TBlockPackedTupleSource : public NNonCopyable::TMoveOnly {
     // TBucketsPackedTupleStorage<Settings>* Storage_;
 };
 
+static_assert(PackedTupleSource<TBlockPackedTupleSource>);
+
 
 
 
@@ -96,7 +98,7 @@ class TBlockPackedTupleSource : public NNonCopyable::TMoveOnly {
 
 
 bool AllInMemory(const TBuckets& buckets) {
-    return !std::ranges::find(buckets, true, [](const TBucket& bucket){return bucket.IsSpilled;});
+    return !std::ranges::find(buckets, true, [](const TBucket& bucket){return bucket.IsSpilled();});
 }
 
 
@@ -166,18 +168,23 @@ struct TRenamesPackedTupleOutput : NNonCopyable::TMoveOnly {
     TSides<IBlockLayoutConverter*> Converters_;
 };
 
-constexpr TPackedTupleStorageSettings RuntimeStorageSettings{.Buckets = 128, .BucketSizeBytes = (1<<19)};
 
 template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputationNode<TBlockHashJoinWrapper<Kind>> {
   private:
     using TBaseComputation = TMutableComputationNode<TBlockHashJoinWrapper>;
         struct FetchingBuildSide {
-            TPackedTupleBucketStorage<RuntimeStorageSettings, TBlockPackedTupleSource<RuntimeStorageSettings>> Fetcher;
+            FetchingBuildSide(TComputationContext& ctx, ISpiller::TPtr spiller, TSides<IComputationNode*> streams,
+                            const TDqBlockJoinMetadata* meta,
+                            TSides<std::unique_ptr<IBlockLayoutConverter>>& converters)
+                            : SpillStorage(std::make_unique<TSpilledPackedTupleStorage<RuntimeStorageSettings>>(spiller, converters.Build->GetTupleLayout()))
+                            , Fetcher( TBlockPackedTupleSource{ctx,streams,meta,converters, ESide::Build }, SpillStorage.get()) {}
+            std::unique_ptr<TSpilledPackedTupleStorage<RuntimeStorageSettings>> SpillStorage;
+            TPackedTupleBucketStorage<RuntimeStorageSettings, TBlockPackedTupleSource> Fetcher;
         };
 
         struct StreamingProbeSide {
 
-            TStreamProbeThroughTable<TBlockPackedTupleSource<RuntimeStorageSettings>> InMemoryStream_;
+            TStreamProbeThroughTable<TBlockPackedTupleSource> InMemoryStream_;
         };
 
         struct SpilledBucket {
@@ -187,11 +194,11 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
         struct PartiallyStreamingProbeSide {
             TMKQLVector<SpilledBucket> SpilledBuildBuckets;
             IBlockLayoutConverter::TPackResult InMemoryBuildSide;
-            enum IsInMemory: bool {
+            enum class EIsInMemory: bool {
                 Spilled,
                 InMemory,
             };
-            TMKQLVector<IsInMemory> BucketsStatus;
+            TMKQLVector<EIsInMemory> BucketsStatus;
         };
 
         struct PairsOfSpilledBuckets {
@@ -204,6 +211,7 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
         };
 
         struct Finished{};
+        using StateType = std::variant<FetchingBuildSide, StreamingProbeSide, PartiallyStreamingProbeSide, StreamingBuckets, Finished>;
 
   public:
     TBlockHashJoinWrapper(TComputationMutables& mutables, TDqBlockJoinMetadata meta, TSides<IComputationNode*> streams)
@@ -230,6 +238,8 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
         return ctx.HolderFactory.Create<TStreamValue>(ctx, Streams_, std::move(layouts), Meta_.get());
     }
 
+
+    
   private:
     class TStreamValue : public TComputationValue<TStreamValue> {
         using TBase = TComputationValue<TStreamValue>;
@@ -248,6 +258,10 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
                                                               .Probe = Converters_.Probe->GetTupleLayout()})
             , Ctx_(&ctx)
             , Output_(meta, {.Build = Converters_.Build.get(), .Probe = Converters_.Probe.get()})
+            , Streams_(streams)
+            , Spiller_(ctx.SpillerFactory->CreateSpiller())
+            , State_(
+                FetchingBuildSide{*Ctx_, Streams_ ,Meta_,Converters_})
         {}
 
         NUdf::EFetchStatus FlushTo(NUdf::TUnboxedValue* output) {
@@ -276,37 +290,112 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
 
                 case NYql::NUdf::EFetchStatus::Ok: {
                     TBuckets& buckets = GetPayload(res);
+                    // int inMemoryTableSizeBytes = std::accumulate(buckets.begin(), buckets.end(), int64_t{0}, [&](int64_t size, const TBucket& bucket){
+                    //     return size += bucket.IsSpilled ? 0 : (std::accumulate(bucket.InMemoryPages.begin(), bucket.InMemoryPages.end(), int64_t{0}, [&](int64_t pageSize, const TPackResult& res){
+                    //         return pageSize + res.AllocatedBytes();
+                    //     }) + bucket.BuildingPage.AllocatedBytes());
+                    // });
+                    NJoinTable::TNeumannJoinTable table{Converters_.Build->GetTupleLayout()};
+                    auto peakMemoryDuringBuild = [&, memoryWithoutDummyStorage = TlsAllocState->GetAllocated()]{    
+                        int64_t flattenMemory = 0;
+                        i64 inMemoryTuples = 0;
+                        for(const auto& bucket: buckets) {
+                            if (!bucket.IsSpilled()) {
+                                // MKQL_ENSURE(bucket.SpilledPages.empty(), "message")
+                                for(auto& page: bucket.InMemoryPages) {
+                                    flattenMemory += page.AllocatedBytes();
+                                    inMemoryTuples += page.NTuples;
+                                }
+                                flattenMemory += bucket.BuildingPage.AllocatedBytes();
+                                inMemoryTuples += bucket.BuildingPage.NTuples;
+                            }
+                        }
+                        // int inMemoryTuples = std::accumulate(buckets.begin(), buckets.end(), i64{0}, [](i64 tuples, const TBucket& thisBucket){
+                        //     // return 
+                        //     const auto& inMemoryPages = thisBucket.InMemoryPages;
+                        //     return thisBucket.IsSpilled ? 0: std::accumulate(inMemoryPages.begin(), inMemoryPages.end(), i64{thisBucket.BuildingPage.NTuples}, [](i64 tuples, const TPackResult& res) {
+                        //         return tuples + res.NTuples;
+                        //     });
+                        // });
+                        // int64_t buildWithMemory = sizeof(ui64)* NPackedTuple::TNeumannHashTable<>::EstimateLogSize(tuples) + table.; 
+                           
+                        return memoryWithoutDummyStorage + std::max(table.Table.RequiredMemoryForBuild(inMemoryTuples), flattenMemory);
+                    };
+                    
+                    ui64 optimisticPeak = peakMemoryDuringBuild();
+                    {
+
+                        std::vector<std::vector<std::byte>> dummyStorage;
+                        while(optimisticPeak > TlsAllocState->GetLimit() && !TlsAllocState->GetMaximumLimitValueReached()) {
+                            int allocSize = std::min(static_cast<i64>(TlsAllocState->GetLimit()*0.1), i64{100*1<<20});
+                            dummyStorage.emplace_back();
+                            dummyStorage.back().resize(allocSize, static_cast<std::byte>(allocSize&1));
+                        }
+                    }
+                    // ui64 decreasingPeak = peakMemoryDuringBuild();
+                    std::optional<StateType> Spiller()
+                    EFetchResult res = ptr->SpillStorage->SpillWhile([]{ return peakMemoryDuringBuild() > TlsAllocState->GetLimit(); } );
+
+                    
+
                     if (AllInMemory(buckets)) {
                         TMKQLVector<IBlockLayoutConverter::TPackResult> inMemoryPages;
                         for(auto& bucket: buckets) {
-                            MKQL_ENSURE(!bucket.IsSpilled, "spilled bucket in happy path?");
-                            MKQL_ENSURE(bucket.SpilledPages.empty(), "spilled pages bucket in happy path?");
+                            MKQL_ENSURE(!bucket.IsSpilled(), "spilled bucket in happy path?");
+                            // MKQL_ENSURE(bucket.SpilledPages.empty(), "spilled pages bucket in happy path?");
                             inMemoryPages.push_back(bucket.DetatchBuildingPage());
                             std::move(bucket.InMemoryPages.begin(), bucket.InMemoryPages.end(), std::back_inserter(inMemoryPages));
                         }
-                        State_ = StreamingProbeSide{Flatten(std::move(inMemoryPages))};
-                        return WideFetch(output, width);
+                        
+                        int64_t memoryRequiredForBuildBytes = [&]{
+                            int64_t flattenMemory = inMemoryTableSizeBytes;
+                            int64_t tuples = std::accumulate(inMemoryPages.begin(), inMemoryPages.end(), i64{0}, [](i64 tuples, const TPackResult& res) {
+                                return tuples + res.NTuples;
+                            });
+                            // int64_t buildWithMemory = sizeof(ui64)* NPackedTuple::TNeumannHashTable<>::EstimateLogSize(tuples) + table.;    
+                            return std::max(table.Table.RequiredMemoryForBuild(tuples), flattenMemory);
+                        }();
+                        std::vector<std::vector<std::byte>> dummyStorage;
+                        i64 peakMemoryDuringBuild = TlsAllocState->GetAllocated() + memoryRequiredForBuildBytes;
+                        while ( peakMemoryDuringBuild < TlsAllocState->GetLimit() && !TlsAllocState->GetMaximumLimitValueReached()) {
+                            int allocSize = std::min(static_cast<i64>(TlsAllocState->GetLimit()*0.1), i64{100*1<<20});
+                            dummyStorage.emplace_back();
+                            dummyStorage.back().resize(allocSize); 
+                        }   
+                        dummyStorage.clear();
+                        dummyStorage.shrink_to_fit();
+                        // MKQL_ENSURE(peakMemoryDuringBuild - memoryRequiredForBuildBytes == TlsAllocState->GetAllocated(), message)
+                        if (!AllocateWithSizeMayThrow(memoryRequiredForBuildBytes)) {
+                            table.BuildWith(Flatten(std::move(inMemoryPages), Converters_.Build->GetTupleLayout()));
+                            StreamingProbeSide foo{TStreamProbeThroughTable<TBlockPackedTupleSource>{
+                                std::move(table), TBlockPackedTupleSource{*Ctx_, Streams_, Meta_, Converters_, ESide::Probe} }};
+                            State_ = std::move(foo);
+                            return WideFetch(output, width);
+                        } else {
+
+                        }
+
                     } else {
                         // PartiallyStreamingProbeSide build{};
                         TMKQLVector<SpilledBucket> spilledBuckets;
                         TMKQLVector<TPackResult> inMemoryPages;
-                        TMKQLVector<typename PartiallyStreamingProbeSide::IsInMemory> status;
+                        TMKQLVector<typename PartiallyStreamingProbeSide::EIsInMemory> status;
                         for(int index = 0; index < std::ssize(buckets); ) {
                             TBucket& bucket = buckets[index];
                             if (bucket.IsSpilled) {
                                 spilledBuckets.emplace_back(std::move(bucket), index);
-                                status.push_back(PartiallyStreamingProbeSide::IsInMemory::Spilled);
+                                status.push_back(PartiallyStreamingProbeSide::EIsInMemory::Spilled);
                             } else {
                                 inMemoryPages.push_back(bucket.DetatchBuildingPage());
                                 std::move(bucket.InMemoryPages.begin(), bucket.InMemoryPages.end(), std::back_inserter(inMemoryPages));
-                                status.push_back(PartiallyStreamingProbeSide::IsInMemory::InMemory);
+                                status.push_back(PartiallyStreamingProbeSide::EIsInMemory::InMemory);
                             }
                         }
                         
-                        State_.emplace(PartiallyStreamingProbeSide{
+                        State_ = PartiallyStreamingProbeSide{
                             .SpilledBuildBuckets = std::move(spilledBuckets), 
-                            .InMemoryBuildSide = Flatten(std::move(inMemoryPages)), 
-                            .BucketsStatus = std::move(status)});
+                            .InMemoryBuildSide = Flatten(std::move(inMemoryPages), Converters_.Build->GetTupleLayout()), 
+                            .BucketsStatus = std::move(status)};
                         // State_ = std::move(build);
                         return WideFetch(output, width);
                     }
@@ -318,7 +407,8 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
                   break;
                 }
             } else if (StreamingProbeSide* ptr = std::get_if<StreamingProbeSide>(&State_)) {
-                TPackResult & tableData = *ptr->InMemoryBuildSide;
+                // ptr->InMemoryStream_.
+                // TPackResult & tableData = *ptr->InMemoryBuildSide;
                 // tableData.
                 return WideFetch(output, width);
             } else if (PartiallyStreamingProbeSide* ptr = std::get_if<PartiallyStreamingProbeSide>(&State_)) {
@@ -352,12 +442,14 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
         }
 
       private:
-        std::variant<FetchingBuildSide, StreamingProbeSide, PartiallyStreamingProbeSide, StreamingBuckets, Finished> State_;
         const TDqBlockJoinMetadata* Meta_;
         TSides<std::unique_ptr<IBlockLayoutConverter>> Converters_;
         JoinType Join_;
         TComputationContext* Ctx_;
         TRenamesPackedTupleOutput Output_;
+        TSides<IComputationNode*> Streams_;
+        ISpiller::TPtr Spiller_;
+        StateType State_;
         const int Threshold_ = 10000;
         bool Finished_ = false;
     };

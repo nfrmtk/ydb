@@ -122,6 +122,21 @@ template <typename Payload> struct One {
 
 template <typename Payload> using FetchResult = std::variant<Finish, Yield, One<Payload>>;
 
+template<typename T>
+T& GetPayload(FetchResult<T>& res){
+    auto* p = std::get_if<One<T>>(&res);
+    MKQL_ENSURE(p, "precondition failed");
+    return p->Data;
+}   
+
+template<typename T>
+const T& GetPayload(const FetchResult<T>& res) {
+    auto* p = std::get_if<One<T>>(&res);
+    MKQL_ENSURE(p, "precondition failed");
+    return p->Data;
+}
+
+
 template <typename Payload> EFetchResult AsResult(const FetchResult<Payload> var) {
     return static_cast<EFetchResult>(int(var.index()) - 1);
 }

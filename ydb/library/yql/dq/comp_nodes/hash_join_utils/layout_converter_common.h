@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ydb/library/yql/dq/comp_nodes/hash_join_utils/tuple.h>
+#include <yql/essentials/minikql/computation/mkql_computation_node_holders.h>
 
 namespace NKikimr::NMiniKQL {
 
@@ -11,6 +12,9 @@ struct TPackResult {
     int64_t NTuples{0};
     int64_t AllocatedBytes() const;
 };
+
+TPackResult Flatten(TMKQLVector<TPackResult> tuples, const NPackedTuple::TTupleLayout* layout);
+
 
 using TPackedTuple = std::vector<ui8, TMKQLAllocator<ui8>>;
 using TOverflow = std::vector<ui8, TMKQLAllocator<ui8>>;

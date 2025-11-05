@@ -263,6 +263,14 @@ int MemoryUsagePercent(int totalBytes) {
     return 100*totalBytes / TlsAllocState->GetLimit();
 }
 
+int FreeMemory() {
+    return TlsAllocState->GetLimit() - TlsAllocState->GetAllocated(); 
+}
+
+bool AllocateWithSizeMayThrow(i64 size) {
+    return FreeMemory() > size;
+}
+
 std::optional<int> GetMemoryUsageIfReachedLimit() {
     if (!TlsAllocState->GetMaximumLimitValueReached()) {
         return std::nullopt;
@@ -277,9 +285,11 @@ bool MemoryPercentIsFree(int freePercent) {
 
 
 struct TBucket {
-    bool IsSpilled = false;
+    bool IsSpilled() const {
+        return SpilledPages.has_value();
+    }
     TPackResult BuildingPage;
-    TMKQLVector<ISpiller::TKey> SpilledPages;
+    std::optional<TMKQLVector<ISpiller::TKey>> SpilledPages;
     TMKQLVector<TPackResult> InMemoryPages;
     TPackResult DetatchBuildingPage() {
         TPackResult res = std::move(BuildingPage);
@@ -317,11 +327,11 @@ struct TPackedTupleStorageSettings {
 
 
 template<TPackedTupleStorageSettings Settings>
-class TBucketsPackedTupleStorage {
+class TSpilledPackedTupleStorage {
     std::optional<int> FindInMemoryBucketWithMostPages() const {
         std::optional<int> resIndex;
         for(int index = 0; index < std::ssize(Buckets_); ++index) {
-            if (!Buckets_[index].IsSpilled && !Buckets_[index].InMemoryPages.empty()) {
+            if (!Buckets_[index].IsSpilled() && !Buckets_[index].InMemoryPages.empty()) {
                 if (resIndex == std::nullopt) {
                     resIndex = index;
                 } else {
@@ -337,7 +347,10 @@ class TBucketsPackedTupleStorage {
         return EFetchResult::Yield;
     }
 public:
-
+    TSpilledPackedTupleStorage(ISpiller::TPtr spiller, const NPackedTuple::TTupleLayout* layout)
+    : Spiller_(spiller)
+    , Layout_(layout) 
+    {}
     void AddRow(NJoinTable::TNeumannJoinTable::Tuple tuple) {
         ui32 hash = NPackedTuple::Hash(tuple.PackedData);
         MKQL_ENSURE(std::popcount(Buckets_.size() - 1) == std::bit_width(std::size(Buckets_)) - 1, "size of buckets should be power of two");
@@ -351,7 +364,7 @@ public:
         }
         // return bucketIndex;
     }
-    EFetchResult SpillWhile(std::predicate auto condition) {
+    [[nodiscard]] EFetchResult SpillWhile(std::predicate auto condition)  {
         while(condition()) {
             if (SpillingPages_.has_value()) {
                 for(auto& future: *SpillingPages_) {
@@ -361,27 +374,28 @@ public:
                 }
                 for(auto& future: *SpillingPages_) {
                     MKQL_ENSURE(future.BlobId.IsReady(), "no blocking wait");
-                    Buckets_[future.BucketIndex].SpilledPages.push_back(future.BlobId.ExtractValueSync());
+                    MKQL_ENSURE(Buckets_[future.BucketIndex].IsSpilled(), "spilled page from in memory bucket?");
+                    Buckets_[future.BucketIndex].SpilledPages->push_back(future.BlobId.ExtractValueSync());
                 }
                 SpillingPages_ = std::nullopt;
             } else {
                 constexpr int kPagesSpillingAtTime = 3;
                 int inMemoryPages = 0;
                 while ((inMemoryPages = std::accumulate(Buckets_.begin(), Buckets_.end(), 0, [&](int pages, const TBucket& bucket) {
-                    return pages + bucket.IsSpilled ? std::ssize(bucket.InMemoryPages) : 0;
+                    return pages + bucket.IsSpilled() ? std::ssize(bucket.InMemoryPages) : 0;
                 })) < kPagesSpillingAtTime) {
                     std::optional<int> bucketIndex = FindInMemoryBucketWithMostPages();
                     if (!bucketIndex) {
                         MKQL_ENSURE(false, "unimplemented"); // we can not spill much and do not have memory. spilling smaller chunks is not implemented currently. 
                     }
-                    Buckets_[*bucketIndex].IsSpilled = true;
+                    Buckets_[*bucketIndex].SpilledPages.emplace();
                 }
                 SpillingPages_.emplace();
                 // TMKQLVector<BlobIdAndBucketIndex> spilledPages;
                 int totalSpillingPages = kPagesSpillingAtTime;
                 for(int index = 0; index < std::ssize(Buckets_); ++index) {
                     auto& bucket = Buckets_[index];
-                    while (bucket.IsSpilled && !bucket.InMemoryPages.empty() && totalSpillingPages != 0) {
+                    while (bucket.IsSpilled() && !bucket.InMemoryPages.empty() && totalSpillingPages != 0) {
                         totalSpillingPages--;
                         SpillingPages_->push_back({.BlobId = Spiller_->Put(Serialize(std::move(bucket.InMemoryPages.back()))), .BucketIndex = index});
                         bucket.InMemoryPages.pop_back();
@@ -389,8 +403,8 @@ public:
                 }
                 MKQL_ENSURE(totalSpillingPages == 0, "not enough pages for spilling?");
             }
-
         }
+        MKQL_ENSURE(!condition(), "sanitiy check");
     }
     TBuckets GetBuckets() {
         MKQL_ENSURE(!SpillingPages_.has_value(), "spilling process should stop when extracting buckets");
@@ -401,11 +415,31 @@ public:
     std::optional<TMKQLVector<BlobIdAndBucketIndex>> SpillingPages_;
     const NPackedTuple::TTupleLayout* Layout_;
 };
+constexpr TPackedTupleStorageSettings RuntimeStorageSettings{.Buckets = 128, .BucketSizeBytes = (1<<19)};
+
+template<typename MemoryIntensiveOp>
+using SpillResult = std::optional<std::invoke_result_t<MemoryIntensiveOp>>;
+
+// template<auto MemoryInternsiveOp, typename HaveEnoughMemoryPred>
+template<typename MemoryIntensiveOp>
+auto Spiller(MemoryIntensiveOp op, std::predicate auto dontHaveEnoughMemoryPred) {
+    using vtype = SpillResult<MemoryIntensiveOp>::value_type;
+    TSpilledPackedTupleStorage<RuntimeStorageSettings>* storage = nullptr;
+    return [=] {
+        EFetchResult res = storage->SpillWhile(dontHaveEnoughMemoryPred());
+        if (res ==EFetchResult::Yield){
+            return std::nullopt;
+        } else {
+            // if con
+            return std::make_optional<typename SpillResult<MemoryIntensiveOp>::value_type>(op());
+        }
+    }
+}  
 
 template<TPackedTupleStorageSettings Settings, typename Source>
 class TPackedTupleBucketStorage: public NNonCopyable::TMoveOnly {
 public:
-    TPackedTupleBucketStorage(Source source): Values_(std::move(source)) {}
+    TPackedTupleBucketStorage(Source source, TSpilledPackedTupleStorage<Settings>* packedTupleSpiller): Values_(std::move(source)), SpillingStorage_(packedTupleSpiller) {}
 
     
     EFetchResult Wait() {
@@ -424,18 +458,18 @@ public:
                 }
                 if (status == NYql::NUdf::EFetchStatus::Finish) {
                     Finished_ = true;
-                    return One{.Data = Storage_->GetBuckets()};
+                    return One{.Data = SpillingStorage_->GetBuckets()};
                 }
                 PackedTuples_ = std::move(GetPayload(rows));
             }
-            auto res = Storage_->SpillWhile([]{
+            auto res = SpillingStorage_->SpillWhile([]{
                 return !MemoryPercentIsFree(30);
             });
             if (res == EFetchResult::Yield) {
                 return Yield{};
             } else {
                 for (int64_t tupleBeg = 0; tupleBeg < std::ssize(PackedTuples_->PackedTuples); tupleBeg += Layout_->TotalRowSize) {
-                    Storage_->AddRow({.PackedData = &PackedTuples_->PackedTuples[tupleBeg*Layout_->TotalRowSize], .OverflowBegin = PackedTuples_->Overflow.data()});
+                    SpillingStorage_->AddRow({.PackedData = &PackedTuples_->PackedTuples[tupleBeg*Layout_->TotalRowSize], .OverflowBegin = PackedTuples_->Overflow.data()});
                 }
                 PackedTuples_ = std::nullopt;
             }
@@ -446,7 +480,7 @@ public:
 private:
     bool Finished_ = false;
     Source Values_;
-    TBucketsPackedTupleStorage<TPackedTupleStorageSettings{.Buckets = 128, .BucketSizeBytes = (1<<19)}>* Storage_;
+    TSpilledPackedTupleStorage<Settings>* SpillingStorage_;
     const NPackedTuple::TTupleLayout* Layout_;
     std::optional<TPackResult> PackedTuples_;
 
@@ -458,6 +492,8 @@ concept PackedTupleSource = requires (T t) {
     {std::as_const(t).Layout()} -> std::same_as<const NPackedTuple::TTupleLayout*>;
     {std::as_const(t).Finished()} -> std::same_as<bool>;
 };
+
+
 
 
 template <typename Source> class TJoinPackedTuples {
@@ -473,30 +509,30 @@ template <typename Source> class TJoinPackedTuples {
         , Table_(Layouts_.Build)
     {}
 
-    TPackResult Flatten(TMKQLVector<TPackResult> tuples) {
-        TPackResult flattened;
-        flattened.NTuples = std::accumulate(tuples.begin(), tuples.end(), i64{0},
-                                            [](i64 summ, const auto& packRes) { return summ += packRes.NTuples; });
+    // TPackResult Flatten(TMKQLVector<TPackResult> tuples) {
+    //     TPackResult flattened;
+    //     flattened.NTuples = std::accumulate(tuples.begin(), tuples.end(), i64{0},
+    //                                         [](i64 summ, const auto& packRes) { return summ += packRes.NTuples; });
 
-        i64 totalTuplesSize = std::accumulate(tuples.begin(), tuples.end(), i64{0}, [](i64 summ, const auto& packRes) {
-            return summ += std::ssize(packRes.PackedTuples);
-        });
-        flattened.PackedTuples.reserve(totalTuplesSize);
+    //     i64 totalTuplesSize = std::accumulate(tuples.begin(), tuples.end(), i64{0}, [](i64 summ, const auto& packRes) {
+    //         return summ += std::ssize(packRes.PackedTuples);
+    //     });
+    //     flattened.PackedTuples.reserve(totalTuplesSize);
 
-        i64 totaOverflowlSize =
-            std::accumulate(tuples.begin(), tuples.end(), i64{0},
-                            [](i64 summ, const auto& packRes) { return summ += std::ssize(packRes.Overflow); });
-        flattened.Overflow.reserve(totaOverflowlSize);
+    //     i64 totaOverflowlSize =
+    //         std::accumulate(tuples.begin(), tuples.end(), i64{0},
+    //                         [](i64 summ, const auto& packRes) { return summ += std::ssize(packRes.Overflow); });
+    //     flattened.Overflow.reserve(totaOverflowlSize);
 
-        int tupleSize = Layouts_.Build->TotalRowSize;
-        for (const IBlockLayoutConverter::TPackResult& tupleBatch : tuples) {
-            Layouts_.Build->Concat(flattened.PackedTuples, flattened.Overflow,
-                                   std::ssize(flattened.PackedTuples) / tupleSize, tupleBatch.PackedTuples.data(),
-                                   tupleBatch.Overflow.data(), tupleBatch.PackedTuples.size() / tupleSize,
-                                   tupleBatch.Overflow.size());
-        }
-        return flattened;
-    }
+    //     int tupleSize = Layouts_.Build->TotalRowSize;
+    //     for (const IBlockLayoutConverter::TPackResult& tupleBatch : tuples) {
+    //         Layouts_.Build->Concat(flattened.PackedTuples, flattened.Overflow,
+    //                                std::ssize(flattened.PackedTuples) / tupleSize, tupleBatch.PackedTuples.data(),
+    //                                tupleBatch.Overflow.data(), tupleBatch.PackedTuples.size() / tupleSize,
+    //                                tupleBatch.Overflow.size());
+    //     }
+    //     return flattened;
+    // }
 
 
     EFetchResult MatchRows([[maybe_unused]] TComputationContext& ctx,
@@ -505,7 +541,7 @@ template <typename Source> class TJoinPackedTuples {
             FetchResult<IBlockLayoutConverter::TPackResult> var = Sources_.Build.FetchRow();
             switch (AsStatus(var)) {
             case NYql::NUdf::EFetchStatus::Finish: {
-                Table_.BuildWith(Flatten(BuildChunks_));
+                Table_.BuildWith(Flatten(BuildChunks_, Layouts_.Build));
                 break;
             }
             case NYql::NUdf::EFetchStatus::Yield: {
@@ -557,11 +593,11 @@ template <typename Source> class TJoinPackedTuples {
 };
 
 template <PackedTupleSource Source> class TStreamProbeThroughTable{
-    public:
+public:
     using TTable = NJoinTable::TNeumannJoinTable;
-    TStreamProbeThroughTable(NJoinTable::TNeumannJoinTable table, Source probe): Table_(std::move(table)), Probe_(std::move(probe)) {
-
-    }
+    TStreamProbeThroughTable(NJoinTable::TNeumannJoinTable table, Source probe)
+    : Table_(std::move(table))
+    , Probe_(std::move(probe)) {}
 
     EFetchResult ProcessProbePack(JoinMatchFun<TTable::Tuple> auto consumeOneOrTwoTuples) {
         if (!Probe_.Finished()) {

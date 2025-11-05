@@ -66,12 +66,13 @@ template <class T> class TBloomFilterMasks {
 
 template <bool ConsecutiveDuplicates = false, bool Prefetch = true,
           typename TAllocator = TMKQLAllocator<ui8>>
-class TNeumannHashTable {
+class TNeumannHashTable/*: public TMoveOnly*/ {
+// public:
+    static constexpr ui32 kEmbeddedSize = 16;
+
     /// hash = [...] [directory_bits] [...] [bloom_filter_bits]
     using Hash = ui32;
     using TBloom = ui16;
-    TNeumannHashTable(TNeumannHashTable&& other) = default;
-    TNeumannHashTable& operator=(TNeumannHashTable&& other) = default;
 
     static constexpr unsigned kBloomBits = 16;
     static constexpr unsigned kBloomMaskBits = 4;
@@ -117,8 +118,6 @@ class TNeumannHashTable {
         return (*thash >> DirectoryHashShift_) & DirectoryHashMask_;
     }
 
-    static constexpr ui32 kEmbeddedSize = 16;
-
     template <bool>
     struct TOutplaceImpl {
         Hash Hash;
@@ -161,6 +160,11 @@ class TNeumannHashTable {
         , Buffer_(Allocator_) 
     {}
 
+    TNeumannHashTable(TNeumannHashTable&& other) = default;
+    TNeumannHashTable& operator=(TNeumannHashTable&& other) = default;
+    TNeumannHashTable(const TNeumannHashTable &) = delete;
+    TNeumannHashTable &operator=(const TNeumannHashTable &) = delete;
+
     explicit TNeumannHashTable(const TTupleLayout *layout): TNeumannHashTable() {
         SetTupleLayout(layout);
     }
@@ -177,25 +181,35 @@ class TNeumannHashTable {
         }
     }
 
-    TNeumannHashTable(const TNeumannHashTable &) = delete;
-    TNeumannHashTable &operator=(const TNeumannHashTable &) = delete;
+    static ui32 EstimateLogSize(int nItems) {
+        int estimated = 32 - std::countl_zero<ui32>(nItems);
+        return std::max(1, std::min(24, estimated > 2 ? estimated - 2 : estimated));
+    }
+ 
+
+    // TNeumannHashTable(TNeumannHashTable&&) = default;
+
+    int64_t RequiredMemoryForBuild(int nItems) {
+        return sizeof(TDirectory)*EstimateLogSize(nItems)+BufferSlotSize_ * nItems;
+    }
 
     void Build(const ui8 *const tuples, const ui8 *const overflow, int nItems,
-               ui32 estimatedLogSize = 0) {
+               std::optional<ui32> estimatedLogSize = std::nullopt) {
         MKQL_ENSURE_S(Layout_ != nullptr);
         MKQL_ENSURE_S(Directories_.empty() && Buffer_.empty() &&
                  Tuples_ == nullptr && Overflow_ == nullptr);
 
-        if (estimatedLogSize == 0) {
-            estimatedLogSize = 32 - std::countl_zero<ui32>(nItems);
-            estimatedLogSize = estimatedLogSize > 2 ? estimatedLogSize - 2 : estimatedLogSize;
+        if (!estimatedLogSize.has_value()) {
+            estimatedLogSize = EstimateLogSize(nItems);
         }
-        estimatedLogSize = std::max(1u, std::min(24u, estimatedLogSize));
+        MKQL_ENSURE(*estimatedLogSize >= 1, "estimated directories size shouldn't be 1");
+        MKQL_ENSURE(*estimatedLogSize <= 24, "estimated directories size shouldn't be too big");
+        // estimatedLogSize =  *estimatedLogSize));
 
         Tuples_ = tuples;
         Overflow_ = overflow;
 
-        DirectoryHashBits_ = estimatedLogSize;
+        DirectoryHashBits_ = *estimatedLogSize;
         DirectoryHashShift_ = sizeof(Hash) * 8 - kBloomHashBits >= DirectoryHashBits_
                                 ? kBloomHashBits
                                 : sizeof(Hash) * 8 - DirectoryHashBits_;
