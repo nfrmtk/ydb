@@ -1,5 +1,6 @@
 #pragma once
 #include "dq_hash_join_table.h"
+#include "dq_join_state.h"
 #include <vector>
 #include <ydb/library/yql/dq/comp_nodes/hash_join_utils/block_layout_converter.h>
 #include <ydb/library/yql/dq/comp_nodes/hash_join_utils/tuple.h>
@@ -351,6 +352,21 @@ public:
     : Spiller_(spiller)
     , Layout_(layout) 
     {}
+    // template<typename MemoryIntensiveOp> 
+    auto MakeSpillUntilPoint(auto memoryIntensiveOp, std::predicate auto dontHaveEnoughMemoryPred) {
+        using SpillResult = std::optional<std::invoke_result_t<decltype(memoryIntensiveOp)>>;
+        using vtype = SpillResult::value_type;
+        return [=] () -> SpillResult {
+            EFetchResult res = this->SpillWhile(dontHaveEnoughMemoryPred());
+            if (res ==EFetchResult::Yield){
+                return std::nullopt;
+            } else {
+                // if con
+                return std::make_optional<SpillResult::value_type>(memoryIntensiveOp());
+            }
+        };
+
+    }
     void AddRow(NJoinTable::TNeumannJoinTable::Tuple tuple) {
         ui32 hash = NPackedTuple::Hash(tuple.PackedData);
         MKQL_ENSURE(std::popcount(Buckets_.size() - 1) == std::bit_width(std::size(Buckets_)) - 1, "size of buckets should be power of two");
@@ -380,10 +396,9 @@ public:
                 SpillingPages_ = std::nullopt;
             } else {
                 constexpr int kPagesSpillingAtTime = 3;
-                int inMemoryPages = 0;
-                while ((inMemoryPages = std::accumulate(Buckets_.begin(), Buckets_.end(), 0, [&](int pages, const TBucket& bucket) {
+                while (std::accumulate(Buckets_.begin(), Buckets_.end(), 0, [&](int pages, const TBucket& bucket) {
                     return pages + bucket.IsSpilled() ? std::ssize(bucket.InMemoryPages) : 0;
-                })) < kPagesSpillingAtTime) {
+                }) < kPagesSpillingAtTime) {
                     std::optional<int> bucketIndex = FindInMemoryBucketWithMostPages();
                     if (!bucketIndex) {
                         MKQL_ENSURE(false, "unimplemented"); // we can not spill much and do not have memory. spilling smaller chunks is not implemented currently. 
@@ -417,21 +432,20 @@ public:
 };
 constexpr TPackedTupleStorageSettings RuntimeStorageSettings{.Buckets = 128, .BucketSizeBytes = (1<<19)};
 
-template<typename MemoryIntensiveOp>
-using SpillResult = std::optional<std::invoke_result_t<MemoryIntensiveOp>>;
 
 // template<auto MemoryInternsiveOp, typename HaveEnoughMemoryPred>
 template<typename MemoryIntensiveOp>
 auto Spiller(MemoryIntensiveOp op, std::predicate auto dontHaveEnoughMemoryPred) {
-    using vtype = SpillResult<MemoryIntensiveOp>::value_type;
+    using SpillResult = std::optional<std::invoke_result_t<MemoryIntensiveOp>>;
+    using vtype = SpillResult::value_type;
     TSpilledPackedTupleStorage<RuntimeStorageSettings>* storage = nullptr;
-    return [=] {
+    return [=] () -> SpillResult {
         EFetchResult res = storage->SpillWhile(dontHaveEnoughMemoryPred());
         if (res ==EFetchResult::Yield){
             return std::nullopt;
         } else {
             // if con
-            return std::make_optional<typename SpillResult<MemoryIntensiveOp>::value_type>(op());
+            return std::make_optional<SpillResult::value_type>(op());
         }
     }
 }  
@@ -628,5 +642,34 @@ private:
 NJoinTable::TNeumannJoinTable Table_;
 Source Probe_;
 };
+
+
+
+struct SpilledBucket {
+    TBucket Bucket;
+    int BucketIndex;
+};
+struct PartiallyStreamingProbeSide {
+    TMKQLVector<SpilledBucket> SpilledBuildBuckets;
+    IBlockLayoutConverter::TPackResult InMemoryBuildSide;
+    enum class EIsInMemory: bool {
+        Spilled,
+        InMemory,
+    };
+    TMKQLVector<EIsInMemory> BucketsStatus;
+};
+
+struct PairsOfSpilledBuckets {
+    TSides<TBucket> SpilledPages;
+    int BucketIndex;
+};
+
+struct StreamingBuckets {
+    PairsOfSpilledBuckets SpilledBuildBuckets;
+};
+
+struct Finished{};
+using StateType = std::variant<FetchingBuildSide, StreamingProbeSide, PartiallyStreamingProbeSide, StreamingBuckets, Finished>;
+
  
 } // namespace NKikimr::NMiniKQL

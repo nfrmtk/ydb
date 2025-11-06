@@ -5,6 +5,12 @@ namespace NKikimr::NMiniKQL {
 int64_t TPackResult::AllocatedBytes() const {
     return PackedTuples.capacity() + Overflow.capacity();
 }
+
+void TPackResult::AppendTuple(TSingleTuple tuple, const NPackedTuple::TTupleLayout* layout) {
+    layout->TupleDeepCopy(tuple.PackedData, tuple.OverflowBegin, PackedTuples, Overflow);
+    NTuples++;
+}
+
 TPackResult Flatten(TMKQLVector<TPackResult> tuples, const NPackedTuple::TTupleLayout* layout) {
     TPackResult flattened;
     flattened.NTuples = std::accumulate(tuples.begin(), tuples.end(), i64{0},
@@ -30,5 +36,7 @@ TPackResult Flatten(TMKQLVector<TPackResult> tuples, const NPackedTuple::TTupleL
     }
     return flattened;
 }
+
+
 
 }

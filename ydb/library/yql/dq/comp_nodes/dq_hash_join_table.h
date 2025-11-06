@@ -86,10 +86,7 @@ class TStdJoinTable {
 
 class TNeumannJoinTable/*: public TMoveOnly*/ {
   public:
-    struct Tuple {
-        const ui8* PackedData;
-        const ui8* OverflowBegin;
-    };
+    using Tuple = TSingleTuple;
 
     TNeumannJoinTable(TNeumannJoinTable&& ) noexcept = default;
     TNeumannJoinTable& operator=(TNeumannJoinTable&& ) noexcept = default;

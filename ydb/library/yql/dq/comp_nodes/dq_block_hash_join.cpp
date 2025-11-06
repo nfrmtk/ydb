@@ -182,36 +182,6 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
             TPackedTupleBucketStorage<RuntimeStorageSettings, TBlockPackedTupleSource> Fetcher;
         };
 
-        struct StreamingProbeSide {
-
-            TStreamProbeThroughTable<TBlockPackedTupleSource> InMemoryStream_;
-        };
-
-        struct SpilledBucket {
-            TBucket Bucket;
-            int BucketIndex;
-        };
-        struct PartiallyStreamingProbeSide {
-            TMKQLVector<SpilledBucket> SpilledBuildBuckets;
-            IBlockLayoutConverter::TPackResult InMemoryBuildSide;
-            enum class EIsInMemory: bool {
-                Spilled,
-                InMemory,
-            };
-            TMKQLVector<EIsInMemory> BucketsStatus;
-        };
-
-        struct PairsOfSpilledBuckets {
-            TSides<TBucket> SpilledPages;
-            int BucketIndex;
-        };
-
-        struct StreamingBuckets {
-            PairsOfSpilledBuckets SpilledBuildBuckets;
-        };
-
-        struct Finished{};
-        using StateType = std::variant<FetchingBuildSide, StreamingProbeSide, PartiallyStreamingProbeSide, StreamingBuckets, Finished>;
 
   public:
     TBlockHashJoinWrapper(TComputationMutables& mutables, TDqBlockJoinMetadata meta, TSides<IComputationNode*> streams)
@@ -282,7 +252,7 @@ template <EJoinKind Kind> class TBlockHashJoinWrapper : public TMutableComputati
             size_t expectedSize = Meta_->Renames.size() + 1;
             MKQL_ENSURE(width == expectedSize,
                         Sprintf("runtime(%i) vs compile-time(%i) tuple width mismatch", width, expectedSize));
-            if (Finished_) {
+            if (auto* ptr = std::get_if<Finished>(&State_)) {
                 return NYql::NUdf::EFetchStatus::Finish;
             } else if (FetchingBuildSide* ptr = std::get_if<FetchingBuildSide>(&State_)) {
                 FetchResult<TBuckets> res = ptr->Fetcher.FetchSide();
