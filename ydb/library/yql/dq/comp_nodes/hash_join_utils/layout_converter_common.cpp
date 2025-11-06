@@ -8,7 +8,7 @@ int64_t TPackResult::AllocatedBytes() const {
 
 void TPackResult::AppendTuple(TSingleTuple tuple, const NPackedTuple::TTupleLayout* layout) {
     layout->TupleDeepCopy(tuple.PackedData, tuple.OverflowBegin, PackedTuples, Overflow);
-    NTuples++;
+    NTuples++;  
 }
 
 TPackResult Flatten(TMKQLVector<TPackResult> tuples, const NPackedTuple::TTupleLayout* layout) {

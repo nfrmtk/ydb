@@ -52,8 +52,9 @@ public:
         MKQL_ENSURE(false, "unimplemented");
         auto& p = GetPayload(res);
         if (p.empty()) {
-            auto sptr = std::make_shared<StreamingBuildSide<Source>>()
-            self = MakeInMemoryJoin(p);
+            MakeSource()
+            auto sptr = std::make_unique<StreamingBuildSide<Source>>()
+            self = sptr;
         }
         // NJoinTable::TNeumannJoinTable table()
         // auto newState = std::make_shared()  

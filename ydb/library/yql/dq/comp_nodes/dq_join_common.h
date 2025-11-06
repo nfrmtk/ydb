@@ -652,10 +652,6 @@ struct SpilledBucket {
 struct PartiallyStreamingProbeSide {
     TMKQLVector<SpilledBucket> SpilledBuildBuckets;
     IBlockLayoutConverter::TPackResult InMemoryBuildSide;
-    enum class EIsInMemory: bool {
-        Spilled,
-        InMemory,
-    };
     TMKQLVector<EIsInMemory> BucketsStatus;
 };
 
