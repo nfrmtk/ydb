@@ -31,6 +31,8 @@ items:
   href: fulltext-indexes.md
 - name: Локальные индексы
   href: bloom-skip-indexes.md
+- name: min_max индекс
+  href: min-max-index.md
 - name: Оптимизация выполнения запросов
   href: query-execution-optimization/index.md
   include:
