@@ -272,6 +272,13 @@ WITH (STORE = COLUMN);
 
 В колоночных и строковых таблицах можно задавать [локальные Блум-индексы](../../glossary.md#local-bloom-skip-index) по колонкам: `LOCAL USING bloom_filter` или `LOCAL USING bloom_ngram_filter`. Индексы создаются при [создании таблицы](../../../yql/reference/syntax/create_table/bloom_skip_index.md) или добавляются через [ALTER TABLE ADD INDEX](../../../yql/reference/syntax/alter_table/indexes.md#local-bloom). Подробнее: [локальные индексы](../../query_execution/local_indexes.md), [Блум-индексы](../../../dev/bloom-skip-indexes.md).
 
+### min_max индекс
+
+{% include [min_max_concept.md](min_max_concept.md) %}
+
+В колоночных таблицах можно задать [локальный min_max индекс](../../glossary.md#local-min_max-skip-index) по колонке: `LOCAL USING min_max`. Индекс добавляется при [создании таблицы](../../../yql/reference/syntax/create_table/min_max_index.md) или добавляется через [ALTER TABLE ADD INDEX](../../../yql/reference/syntax/alter_table/indexes.md#local-min_max). Подробнее: [локальные индексы](../../query_execution/local_indexes.md), [min_max индекс](../../../dev/min_max-indexes.md).
+
+
 ### Партицирование колоночной таблицы {#olap-tables-partitioning}
 
 В отличие от строковых таблиц {{ ydb-short-name }}, колоночные таблицы партицируют данные не по первичным ключам, а по специально выделенным ключам — ключам партицирования. Ключи партицирования являются подмножеством первичных ключей таблицы.
