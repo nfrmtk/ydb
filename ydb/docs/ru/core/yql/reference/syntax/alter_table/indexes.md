@@ -38,11 +38,16 @@ ALTER TABLE `<table_name>`
 
 ### Ограничения
 
-Операция `ADD INDEX` для создания глобальных вторичных (`GLOBAL`, `UNIQUE` и т.п.) и векторных индексов поддерживается только для строковых таблиц. Для [колоночных таблиц](../../../../concepts/datamodel/table.md#column-oriented-tables) через `ADD INDEX` [поддерживаются только локальные блум-индексы](#local-bloom).
+Операция `ADD INDEX` для создания глобальных вторичных (`GLOBAL`, `UNIQUE` и т.п.) и векторных индексов поддерживается только для строковых таблиц. Для [колоночных таблиц](../../../../concepts/datamodel/table.md#column-oriented-tables) через `ADD INDEX` min_max и [блум-индексы](#local-bloom).
 
 Для локальных блум-индексов действуют следующие ограничения:
 
 {% include [bloom_skip_index_limitations.md](../_includes/bloom_skip_index_limitations.md) %}
+
+Для локального min_max индекса действуют похожие ограничения:
+
+{% include [min_max_index_limitations.md](../_includes/min_max_index_limitations.md) %}
+
 
 ### Примеры
 
@@ -99,6 +104,14 @@ ALTER TABLE `/Root/Table`
     false_positive_probability = 0.01,
     case_sensitive = true
   );
+```
+
+min_max индекс:
+
+```yql
+ALTER TABLE `/Root/Table`
+  ADD INDEX idx_min_max LOCAL USING min_max
+  ON (resource_id);
 ```
 
 ## Изменение параметров индекса {#alter-index}
@@ -190,7 +203,7 @@ ALTER TABLE `series` DROP INDEX `title_index`;
 
 Возможность атомарной замены индекса под нагрузкой поддерживается командой [{{ ydb-cli }} table index rename](../../../../reference/ydb-cli/commands/secondary_index.md#rename) {{ ydb-short-name }} CLI и специализированными методами {{ ydb-short-name }} SDK.
 
-Это относится к глобальным вторичным индексам (скрытая индексная таблица и режим `--replace`). Локальные блум-индексы к такой атомарной замене под нагрузкой не применимы.
+Это относится к глобальным вторичным индексам (скрытая индексная таблица и режим `--replace`). Локальные min_max и блум-индексы к такой атомарной замене под нагрузкой не применимы.
 
 {% endif %}
 

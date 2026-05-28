@@ -18,6 +18,7 @@
 - [векторный индекс](../../../../concepts/glossary.md#vector-index);
 - [полнотекстовый индекс](../../../../concepts/glossary.md#fulltext-index);
 - [локальный Блум индекс](../../../../concepts/glossary.md#local-bloom-skip-index);
+- [локальный min_max индекс](../../../../concepts/glossary.md#local-min_max-index); #проверить бы
 - [топик](../../../../concepts/datamodel/topic.md) (только схема);
 - [представление (view)](../../../../concepts/datamodel/view.md);
 - [асинхронная репликация](../../../../concepts/async-replication.md);

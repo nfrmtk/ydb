@@ -27,8 +27,10 @@ items:
   include:
     mode: link
     path: fulltext-search/toc_p.yaml
-- name: Локальные индексы
+- name: Локальные Bloom индексы
   href: bloom-skip-indexes/bloom-skip-index-quickstart.md
+- name: Локальный min_max индекс
+  href: min-max-index/min-max-index-quickstart.md
 - name: Трансфер
   href: transfer/index.md
   include:

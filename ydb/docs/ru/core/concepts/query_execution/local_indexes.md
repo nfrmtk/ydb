@@ -36,3 +36,16 @@
 
 * [Блум-индексы](../../dev/bloom-skip-indexes.md)
 * [Справочник YQL: ALTER TABLE ADD INDEX](../../yql/reference/syntax/alter_table/indexes.md#local-bloom)
+
+## min_max index {#min_max-index}
+
+min_max индекс — частный случай [локального индекса](../glossary.md#local-index), использующий для фильтрации минимальное и максимальное значение данных колонки, для которой он был задан.
+
+### Когда применять? 
+
+Применять для оптимизации запросов с высокоселективными фильтрами вида `column = $value`. Предикат может быть не только на равенство, но и на >, <, >=, <=, на включение в интервал. При этом данные в `column` должны быть коррелированны с первичным ключом.
+
+### Дополнительные материалы
+
+* [min_max индекс](../../dev/min_max-index.md)
+* [Справочник YQL: ALTER TABLE ADD INDEX](../../yql/reference/syntax/alter_table/indexes.md#local-min_max)
